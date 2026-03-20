@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>磚家計算 - 專案列表</title>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    
+    <style>
+        :root {
+            --header-bg: linear-gradient(90deg, #00c4cc, #7d2ae8);
+            --bg-color: #f9fbfd;
+            --header-height: 56px;
+            --text-primary: #0d1216;
+            --text-secondary: #5f6368;
+            --border-color: #dadce0;
+            --hover-bg: rgba(255, 255, 255, 0.1);
+            --accent-purple: #7d2ae8;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        body { background-color: white; color: var(--text-primary); -webkit-user-select: none; user-select: none;}
+
+        /* --- Header --- */
+        header {
+            display: flex; align-items: center; justify-content: space-between;
+            height: var(--header-height); padding: 0 16px; position: sticky; top: 0;
+            background: var(--header-bg); color: white; box-shadow: 0 1px 4px rgba(0,0,0,0.1); z-index: 100;
+        }
+        .header-left { display: flex; align-items: center; gap: 12px; min-width: 200px; }
+        .logo-area { display: flex; align-items: center; gap: 8px; font-size: 20px; font-weight: bold; }
+        .header-center { flex: 1; max-width: 720px; padding: 0 20px; position: relative; }
+
+        .search-bar {
+            background: rgba(255, 255, 255, 0.2); border: 1px solid rgba(255, 255, 255, 0.3);
+            border-radius: 6px; height: 42px; display: flex; align-items: center; padding: 0 16px;
+            transition: all 0.3s;
+        }
+        .search-bar:hover { background: rgba(255, 255, 255, 0.3); }
+        .search-bar.active { background: white; border-color: transparent; border-radius: 6px 6px 0 0; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .search-bar input { border: none; background: transparent; flex: 1; padding: 0 10px; font-size: 15px; outline: none; color: white; }
+        .search-bar input::placeholder { color: rgba(255, 255, 255, 0.8); }
+        .search-bar.active input { color: #333; }
+        .search-bar .search-icon { color: white; }
+        .search-bar.active .search-icon { color: #555; }
+
+        .search-history-dropdown {
+            display: none; position: absolute; top: 42px; left: 20px; right: 20px;
+            background: white; border-radius: 0 0 8px 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding-bottom: 8px; z-index: 101;
+        }
+        .search-history-dropdown.show { display: block; }
+        .history-item { display: flex; align-items: center; padding: 10px 16px; cursor: pointer; color: #333; }
+        .history-item:hover { background-color: #f5f5f5; }
+        .history-icon { margin-right: 18px; color: var(--text-secondary); font-size: 20px; }
+
+        .header-right { display: flex; align-items: center; gap: 16px; min-width: 100px; justify-content: flex-end; }
+        .icon-btn {
+            padding: 8px; border-radius: 50%; cursor: pointer; color: white; display: flex;
+            align-items: center; justify-content: center; border: none; background: transparent; transition: 0.2s;
+        }
+        .icon-btn:hover { background-color: var(--hover-bg); }
+
+        /* --- Main Content --- */
+        .template-section { background-color: var(--bg-color); padding: 30px 0; border-bottom: 1px solid var(--border-color); }
+        .container { max-width: 1000px; margin: 0 auto; padding: 0 20px; }
+        .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; font-size: 16px; color: #202124; }
+        
+        .template-grid { display: flex; gap: 20px; overflow-x: auto; padding-bottom: 10px; padding-top: 10px;}
+        .template-card { display: flex; flex-direction: column; cursor: pointer; width: 150px; flex-shrink: 0; transition: transform 0.2s; }
+        .template-card:hover { transform: translateY(-3px); }
+        .template-preview {
+            height: 190px; background-color: white; border: 1px solid var(--border-color);
+            border-radius: 8px; margin-bottom: 12px; transition: 0.2s; display: flex; align-items: center; justify-content: center;
+        }
+        .template-card:hover .template-preview { border-color: var(--accent-purple); box-shadow: 0 4px 12px rgba(125, 42, 232, 0.15); }
+        .plus-icon { font-size: 54px; color: var(--accent-purple); }
+        .template-title { font-size: 14px; font-weight: 600; text-align: center; }
+
+        .recent-section { padding: 30px 0; background-color: white; min-height: 500px; }
+        .filter-controls { display: flex; align-items: center; gap: 5px; position: relative; }
+        .filter-controls .icon-btn { color: var(--text-secondary); }
+        .filter-controls .icon-btn:hover { background-color: #f1f3f4; }
+
+        .sort-dropdown {
+            display: none; position: absolute; top: 100%; right: 0; width: 200px;
+            background: white; border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); padding: 8px 0; z-index: 200;
+        }
+        .sort-dropdown.show { display: block; }
+        .dropdown-item { padding: 10px 20px; font-size: 14px; cursor: pointer; display: flex; justify-content: space-between; }
+        .dropdown-item:hover { background-color: #f5f5f5; }
+        .dropdown-item.active { font-weight: 600; color: var(--accent-purple); }
+        .dropdown-item .check-icon { font-size: 18px; opacity: 0; }
+        .dropdown-item.active .check-icon { opacity: 1; }
+
+        /* ── Export Modal ── */
+        .modal-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6); display: flex; justify-content: center;
+            align-items: center; z-index: 1000; backdrop-filter: blur(4px);
+        }
+        .modal-content {
+            background: white; width: 700px; max-width: 95%; max-height: 85vh;
+            border-radius: 12px; box-shadow: 0 15px 40px rgba(0,0,0,0.25);
+            display: flex; flex-direction: column; overflow: hidden;
+        }
+        .modal-header {
+            padding: 16px 24px; background: white; border-bottom: 1px solid #eee;
+            display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
+        }
+        .modal-header h3 { margin: 0; font-size: 18px; color: #333; }
+        .modal-body { padding: 24px; overflow-y: auto; flex: 1; background: #fcfcfc; }
+        .modal-footer {
+            padding: 16px 24px; background: white; border-top: 1px solid #eee;
+            display: flex; justify-content: flex-end; gap: 12px; flex-shrink: 0;
+        }
+        .section-title {
+            font-size: 14px; font-weight: 700; color: #7d2ae8; margin: 20px 0 10px 0;
+            text-transform: uppercase; letter-spacing: 0.5px;
+            border-left: 3px solid #7d2ae8; padding-left: 8px;
+        }
+        .section-title:first-child { margin-top: 0; }
+        .form-group label { display: block; font-size: 13px; font-weight: 500; color: #555; margin-bottom: 6px; }
+        .grid-2-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .pet-btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+        .btn-spawn-pet {
+            background: #f0f7ff; border: 1px solid #cce5ff; color: #0056b3;
+            padding: 8px; border-radius: 6px; cursor: pointer; font-size: 13px;
+            font-weight: 600; transition: all 0.2s; display: flex; gap: 8px; align-items: center;
+        }
+        .btn-spawn-pet:hover { background: #cce5ff; }
+        .btn-cancel {
+            background: #f1f3f5; color: #495057; border: 1px solid #dee2e6;
+            padding: 10px 24px; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all 0.2s;
+        }
+        .btn-cancel:hover { background: #e9ecef; }
+        .btn-save {
+            background: #7d2ae8; color: white; border: 1px solid #7d2ae8;
+            padding: 10px 24px; border-radius: 6px; cursor: pointer; font-weight: 600;
+            box-shadow: 0 2px 5px rgba(125,42,232,0.3); transition: all 0.2s;
+        }
+        .btn-save:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        .close-btn {
+            background: transparent; border: none; font-size: 28px; font-weight: bold;
+            color: #aaa; cursor: pointer; line-height: 1; padding: 0 8px;
+        }
+        .close-btn:hover { color: #333; }
+
+        /* ★ 網格與卡片樣式修正 (控制 z-index 圖層) */
+        .docs-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 24px; margin-top: 20px; }
+        
+        .doc-card {
+            border: 1px solid var(--border-color); border-radius: 8px; cursor: pointer;
+            transition: 0.2s; background: white; position: relative;
+            z-index: 1; /* 預設圖層 */
+        }
+        .doc-card:hover { border-color: var(--accent-purple); box-shadow: 0 4px 12px rgba(0,0,0,0.08); transform: translateY(-2px); z-index: 2; }
+        
+        /* 當選單被打開時，這張卡片會加上 menu-active class，圖層提到最高，確保選單不會被下方的卡片蓋住 */
+        .doc-card.menu-active { z-index: 100; } 
+        
+        .doc-preview { height: 180px; border-bottom: 1px solid var(--border-color); background-color: #fafafa; display: flex; justify-content: center; align-items: center; color: #ccc; font-size: 48px; border-radius: 8px 8px 0 0; }
+        .doc-info { padding: 14px; display: flex; justify-content: space-between; align-items: center; }
+        .doc-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 140px; }
+        .doc-meta { font-size: 12px; color: var(--text-secondary); }
+
+        /* List View */
+        .list-header { display: none; padding: 0 16px; margin-bottom: 8px; margin-top: 10px; font-size: 14px; color: var(--text-secondary); font-weight: 600; border-bottom: 2px solid #f0f0f0; padding-bottom: 10px; }
+        .docs-list-container { display: flex; flex-direction: column; }
+        .list-row {
+            display: flex; align-items: center; padding: 12px 16px; border-radius: 8px; cursor: pointer;
+            transition: background 0.1s; border-bottom: 1px solid #f0f0f0; position: relative;
+            z-index: 1;
+        }
+        .list-row:hover { background-color: #f6f7f9; z-index: 2;}
+        .list-row.menu-active { z-index: 100; }
+        
+        .list-icon { margin-right: 16px; color: var(--accent-purple); font-size: 20px; }
+        .list-title { flex: 1; font-size: 15px; font-weight: 600; padding-right: 20px; }
+        .list-date { width: 150px; font-size: 13px; color: var(--text-secondary); }
+
+        /* --- Action Menu (複製/下載/刪除) --- */
+        .menu-wrapper { position: relative; }
+        .menu-wrapper .icon-btn { color: #888; }
+        .menu-wrapper .icon-btn:hover { background-color: rgba(0,0,0,0.05); color: #333; }
+        
+        .action-menu {
+            display: none; position: absolute; right: 0; top: 100%; background: white;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2); border-radius: 6px; padding: 6px 0;
+            z-index: 100; min-width: 140px; border: 1px solid #eee;
+        }
+        .action-menu.show { display: block; }
+        .action-item {
+            padding: 10px 16px; font-size: 14px; color: #333; display: flex; align-items: center; gap: 10px; transition: 0.2s;
+        }
+        .action-item:hover { background-color: #f5f5f5; }
+        .action-item.danger { color: #d93025; border-top: 1px solid #eee; margin-top: 4px; padding-top: 10px; }
+        .action-item i { font-size: 16px; width: 16px; text-align: center; }
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="header-left">
+            <div class="logo-area"><i class="fa-solid fa-shapes"></i> <span>磚家計算</span></div>
+        </div>
+        <div class="header-center" id="searchWrapper">
+            <div class="search-bar" id="searchBar">
+                <span class="material-icons search-icon" style="padding:0; margin-right:8px;">search</span>
+                <input type="text" placeholder="搜尋專案..." id="searchInput" autocomplete="off">
+            </div>
+        </div>
+        <div class="header-right"></div>
+    </header>
+
+    <main>
+        <section class="template-section">
+            <div class="container">
+                <div class="section-header"><span><strong>新增專案</strong></span></div>
+                <div class="template-grid">
+                    <div class="template-card" onclick="createBlankProject()">
+                        <div class="template-preview"><div class="new-doc-btn"><span class="material-icons plus-icon">add</span></div></div>
+                        <div class="template-title">完整空白檔案</div>
+                    </div>
+
+                    <div class="template-card" onclick="document.getElementById('excelUpload').click()">
+                        <div class="template-preview">
+                          <div class="new-doc-btn">
+                            <span class="material-icons plus-icon">file_upload</span>
+                          </div>
+                        </div>
+                        <div class="template-title">匯入 Excel 檔案</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <input type="file" id="excelUpload" accept=".xlsx, .xls" style="display: none;" onchange="importExcel(event)">
+
+        <section class="recent-section">
+            <div class="container">
+                <div class="section-header">
+                    <span><strong>最近的專案</strong></span>
+                    <div class="filter-controls">
+                        <button class="icon-btn" id="viewToggleBtn" title="切換視角"><i class="material-icons">list</i></button>
+                        <button class="icon-btn" id="sortBtn" title="排序選項"><i class="material-icons">sort_by_alpha</i></button>
+                        <div class="sort-dropdown" id="sortDropdown">
+                            <div class="dropdown-item active" onclick="setSort('lastOpened')">最新修改 <span class="material-icons check-icon">check</span></div>
+                            <div class="dropdown-item" onclick="setSort('title')">標題 <span class="material-icons check-icon">check</span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="list-header" id="listHeader">
+                    <div style="flex:1; padding-left: 36px;">專案名稱</div>
+                    <div style="width: 150px;">修改時間</div>
+                    <div style="width: 40px;"></div>
+                </div>
+
+                <div id="docsContainer"></div>
+            </div>
+        </section>
+    </main>
+
+    <!-- ── Export Modal ── -->
+    <div id="exportModal" class="modal-overlay" style="display:none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fa-solid fa-file-export"></i> 進階匯出設定</h3>
+                <button class="close-btn" onclick="closeExportModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <h4 class="section-title">輸出格式</h4>
+                <div style="background:#f8f9fa;padding:15px;border-radius:8px;margin-bottom:20px;">
+                    <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+                        <input type="checkbox" id="exportPureValue" style="width:18px;height:18px;">
+                        <span style="font-weight:600;color:#333;">純數字版 (不包含 Excel 運算公式，適合手機查看)</span>
+                    </label>
+                </div>
+                <h4 class="section-title">選擇要輸出的工作表 (Sheet)</h4>
+                <div id="sheetSelectGrid" class="pet-btn-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px;">
+                    <label class="btn-spawn-pet"><input type="checkbox" checked value="清冊"> 土地清冊</label>
+                    <label class="btn-spawn-pet"><input type="checkbox" checked value="增值稅歸戶表"> 增值稅歸戶</label>
+                    <label class="btn-spawn-pet"><input type="checkbox" checked value="土地歸戶表"> 土地歸戶表</label>
+                    <label class="btn-spawn-pet"><input type="checkbox" checked value="地主可分配面積"> 可分配面積</label>
+                    <label class="btn-spawn-pet"><input type="checkbox" checked value="基本分析"> 基本分析</label>
+                </div>
+                <h4 class="section-title">數據範圍過濾</h4>
+                <div class="grid-2-col" style="margin-bottom:20px;">
+                    <div class="form-group">
+                        <label>過濾模式</label>
+                        <select id="exportFilterType" onchange="toggleExportFilterUI()" style="width:100%;padding:10px;border-radius:6px;border:1px solid #ddd;">
+                            <option value="all">匯出全部數據</option>
+                            <option value="land">僅匯出指定地號</option>
+                            <option value="owner">僅匯出指定所有權人</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="exportFilterValueWrap" style="display:none;">
+                        <label id="exportFilterLabel">請選擇</label>
+                        <select id="exportFilterValue" style="width:100%;padding:10px;border-radius:6px;border:1px solid #ddd;"></select>
+                    </div>
+                </div>
+                <h4 class="section-title">隱藏特定欄位 (僅影響清冊分頁)</h4>
+                <div id="columnToggleGrid" style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;font-size:13px;"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-cancel" onclick="closeExportModal()">取消</button>
+                <button class="btn-save" style="background:#1D6F42;border-color:#1D6F42;" onclick="startAdvancedExport()">
+                    <i class="fa-solid fa-file-excel"></i> 開始執行匯出
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script src="excel.js"></script>
+    <script>
+        function getProjects() {
+            return JSON.parse(localStorage.getItem('brick_projects') || '[]');
+        }
+
+        function getUniqueTitle(baseTitle) {
+            const projects = getProjects();
+            let title = baseTitle;
+            let counter = 1;
+            while (projects.some(p => p.title === title)) {
+                title = `${baseTitle} (${counter})`;
+                counter++;
+            }
+            return title;
+        }
+
+        function createBlankProject() {
+            const newId = 'proj_' + Date.now();
+            const uniqueTitle = getUniqueTitle("未命名專案");
+            
+            const defaultBasics = {
+                '地段': uniqueTitle,
+                '地主可分配面積': { '預估獎勵容積(m²)': [0.08, 0, 0, 0], '合建基準容積分取': [0, 0.6], '合建獎勵容積分取': [0, 0.6], '預估產權面積(坪)': 1.62, '預估車位數': 0.6 },
+                '土地歸戶表': { '合計法定容積': 2.25, '地主法定容積佔比': 0.58, '都更獎勵容積': 0.5, '地主獎勵容積佔比': 0.5, '防災都更獎勵容積': 0.3, '地主防災都更佔比': 0.5, '合建分取': 1.58 }
+            };
+
+            const newProject = {
+                id: newId, title: uniqueTitle, data: {}, basics: defaultBasics,
+                date: new Date().toLocaleDateString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit' }),
+                timestamp: Date.now() 
+            };
+
+            const projects = getProjects();
+            projects.push(newProject);
+            localStorage.setItem('brick_projects', JSON.stringify(projects));
+            window.location.href = `test.html?id=${newId}`;
+        }
+
+        function openProject(id) {
+            window.location.href = `test.html?id=${id}`;
+        }
+
+        // ==================== 讀取 Excel ====================
+        // ==================== 讀取並還原 Excel ====================
+        function importExcel(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                const buffer = e.target.result;
+                const workbook = new ExcelJS.Workbook();
+                
+                try {
+                    await workbook.xlsx.load(buffer);
+                    
+                    // 取得需要用到的三個工作表
+                    const sheetA = workbook.getWorksheet('清冊');
+                    const sheetC = workbook.getWorksheet('土地歸戶表');
+                    const sheetD = workbook.getWorksheet('地主可分配面積');
+                    
+                    if (!sheetA) {
+                        throw new Error('找不到名為 "清冊" 的工作表。');
+                    }
+
+                    // --- 1. 準備接收資料的空物件 ---
+                    let importedData = {};
+                    let importedBasics = {
+                        '地段': '',
+                        '地主可分配面積': { '預估獎勵容積(m²)': [0.08, 0, 0, 0], '合建基準容積分取': [0, 0.6], '合建獎勵容積分取': [0, 0.6], '預估產權面積(坪)': 1.62, '預估車位數': 0.6 },
+                        '土地歸戶表': { '合計法定容積': 2.25, '地主法定容積佔比': 0.58, '都更獎勵容積': 0.5, '地主獎勵容積佔比': 0.5, '防災都更獎勵容積': 0.3, '地主防災都更佔比': 0.5, '合建分取': 1.58 }
+                    };
+
+                    // 小幫手：安全獲取儲存格的數值 (包含處理 Excel 公式格)
+                    const getVal = (sheet, r, c) => {
+                        if (!sheet) return '';
+                        let cell = sheet.getCell(r, c);
+                        let val = cell.value;
+                        if (val && typeof val === 'object' && val.result !== undefined) return val.result;
+                        return val === null ? '' : val;
+                    };
+
+                    // --- 2. 還原 Basics 物件 ---
+                    importedBasics['地段'] = getVal(sheetA, 4, 1) || '匯入專案';
+                    
+                    if (sheetD) {
+                        importedBasics['地主可分配面積']['預估獎勵容積(m²)'] = [
+                            parseFloat(getVal(sheetD, 3, 15)) || 0, parseFloat(getVal(sheetD, 3, 16)) || 0,
+                            parseFloat(getVal(sheetD, 3, 17)) || 0, parseFloat(getVal(sheetD, 3, 18)) || 0
+                        ];
+                        importedBasics['地主可分配面積']['合建基準容積分取'] = [
+                            parseFloat(getVal(sheetD, 3, 21)) || 0, parseFloat(getVal(sheetD, 3, 22)) || 0
+                        ];
+                        importedBasics['地主可分配面積']['合建獎勵容積分取'] = [
+                            parseFloat(getVal(sheetD, 3, 23)) || 0, parseFloat(getVal(sheetD, 3, 24)) || 0
+                        ];
+                        importedBasics['地主可分配面積']['預估產權面積(坪)'] = parseFloat(getVal(sheetD, 3, 27)) || 0;
+                        importedBasics['地主可分配面積']['預估車位數'] = parseFloat(getVal(sheetD, 3, 28)) || 0;
+                    }
+
+                    if (sheetC) {
+                        importedBasics['土地歸戶表']['合計法定容積']     = parseFloat(getVal(sheetC, 3, 8))  || 2.25;
+                        importedBasics['土地歸戶表']['地主法定容積佔比'] = parseFloat(getVal(sheetC, 3, 9))  || 0.58;
+                        importedBasics['土地歸戶表']['都更獎勵容積']     = parseFloat(getVal(sheetC, 3, 10)) || 0.5;
+                        importedBasics['土地歸戶表']['地主獎勵容積佔比'] = parseFloat(getVal(sheetC, 3, 11)) || 0.5;
+                        importedBasics['土地歸戶表']['防災都更獎勵容積'] = parseFloat(getVal(sheetC, 3, 12)) || 0.3;
+                        importedBasics['土地歸戶表']['地主防災都更佔比'] = parseFloat(getVal(sheetC, 3, 13)) || 0.5;
+                        importedBasics['土地歸戶表']['合建分取']         = parseFloat(getVal(sheetC, 3, 14)) || 1.58;
+                    }
+
+                    // --- 3. 還原 Data 物件 ---
+                    let currentLandNo = ''; // 用來記錄合併儲存格向下延伸的地號
+                    
+                    for (let i = 4; i <= sheetA.rowCount; i++) {
+                        let landNoStr = getVal(sheetA, i, 3);
+                        let ownerStr = getVal(sheetA, i, 4);
+                        
+                        // 遇到總計列代表資料結束
+                        if (landNoStr === '總計' || ownerStr === '總計') break; 
+                        
+                        // 若地號格有值，代表遇到新的地號區塊
+                        if (landNoStr) {
+                            currentLandNo = String(landNoStr);
+                            if (!importedData[currentLandNo]) {
+                                importedData[currentLandNo] = {
+                                    "所有權人": [],
+                                    "土地面積": { "面積": parseFloat(getVal(sheetA, i, 5)) || 0, "權利範圍": [] },
+                                    "他項權利": String(getVal(sheetA, i, 11) || ""),
+                                    "公告現值": [], "年月": [], "當期公告現值": parseFloat(getVal(sheetA, i, 14)) || 0,
+                                    "增值稅預估(自用)": [], "增值稅預估(一般)": [], "建號": [], "建物門牌": [], "樓層": [],
+                                    "建物面積": [], "權利範圍": [], "所有權地址": [],
+                                    "電話": String(getVal(sheetA, i, 26) || ""),
+                                    "增值稅試算(自用)": [], "增值稅試算(一般)": [],
+                                    "使用分區": sheetD ? String(getVal(sheetD, i, 11) || '商') : '商',
+                                    "基準容積率": sheetD ? (parseFloat(getVal(sheetD, i, 12)) || 4.4) : 4.4,
+                                    "建蔽率": sheetD ? (parseFloat(getVal(sheetD, i, 13)) || 0.7) : 0.7
+                                };
+                            }
+                        }
+
+                        if (!currentLandNo || !ownerStr) continue; 
+
+                        // 寫入各個所有權人的陣列細節
+                        importedData[currentLandNo]["所有權人"].push(String(ownerStr));
+                        
+                        // 處理權利範圍 (可能是字串 "1/2" 或是小數 0.5)
+                        let scopeVal = getVal(sheetA, i, 7);
+                        if (typeof scopeVal === 'string' && scopeVal.includes('/')) {
+                            let parts = scopeVal.split('/');
+                            scopeVal = parseFloat(parts[0]) / parseFloat(parts[1]);
+                        } else {
+                            scopeVal = parseFloat(scopeVal) || 0;
+                        }
+                        importedData[currentLandNo]["土地面積"]["權利範圍"].push(scopeVal);
+
+                        importedData[currentLandNo]["公告現值"].push(parseFloat(getVal(sheetA, i, 12)) || 0);
+                        importedData[currentLandNo]["年月"].push(String(getVal(sheetA, i, 13) || ""));
+                        importedData[currentLandNo]["增值稅預估(自用)"].push(parseFloat(getVal(sheetA, i, 15)) || "");
+                        importedData[currentLandNo]["增值稅預估(一般)"].push(parseFloat(getVal(sheetA, i, 16)) || "");
+                        importedData[currentLandNo]["建號"].push(String(getVal(sheetA, i, 17) || ""));
+                        const _importBuildAddr = String(getVal(sheetA, i, 18) || "");
+                        importedData[currentLandNo]["建物門牌"].push(_importBuildAddr);
+                        // 自動從「建物門牌」抓取樓層填入「樓層」欄位（若樓層欄位為空，支援國字）
+                        let _importFloor = String(getVal(sheetA, i, 19) || "");
+                        if (!_importFloor && _importBuildAddr) {
+                            const _cnMap = {'一':1,'二':2,'三':3,'四':4,'五':5,'六':6,'七':7,'八':8,'九':9,
+                                            '十':10,'十一':11,'十二':12,'十三':13,'十四':14,'十五':15,
+                                            '十六':16,'十七':17,'十八':18,'十九':19,'二十':20};
+                            const _fm = _importBuildAddr.match(/([一二三四五六七八九十百千\d]+(?:之[一二三四五六七八九十\d]+)?)\s*樓/);
+                            if (_fm) {
+                                const _raw = _fm[1];
+                                if (/^\d+$/.test(_raw)) {
+                                    _importFloor = _raw + '樓';
+                                } else if (_cnMap[_raw] !== undefined) {
+                                    _importFloor = _cnMap[_raw] + '樓';
+                                } else {
+                                    const _tens = _raw.match(/^([一二三四五六七八九]?)十([一二三四五六七八九]?)$/);
+                                    if (_tens) {
+                                        const _t = _tens[1] ? (_cnMap[_tens[1]] || 0) : 1;
+                                        const _u = _tens[2] ? (_cnMap[_tens[2]] || 0) : 0;
+                                        _importFloor = (_t * 10 + _u) + '樓';
+                                    } else {
+                                        _importFloor = _raw + '樓';
+                                    }
+                                }
+                            }
+                        }
+                        importedData[currentLandNo]["樓層"].push(_importFloor);
+                        importedData[currentLandNo]["建物面積"].push(parseFloat(getVal(sheetA, i, 20)) || "");
+                        
+                        // 處理建物權利範圍
+                        let bScopeVal = getVal(sheetA, i, 22);
+                        if (typeof bScopeVal === 'string' && bScopeVal.includes('/')) {
+                            let parts = bScopeVal.split('/');
+                            bScopeVal = parseFloat(parts[0]) / parseFloat(parts[1]);
+                        } else {
+                            bScopeVal = parseFloat(bScopeVal) || "";
+                        }
+                        importedData[currentLandNo]["權利範圍"].push(bScopeVal);
+
+                        importedData[currentLandNo]["所有權地址"].push(String(getVal(sheetA, i, 25) || ""));
+                        importedData[currentLandNo]["增值稅試算(一般)"].push(parseFloat(getVal(sheetA, i, 27)) || "");
+                        importedData[currentLandNo]["增值稅試算(自用)"].push(parseFloat(getVal(sheetA, i, 28)) || "");
+                    }
+
+                    // --- 4. 存入 LocalStorage 並導向專案 ---
+                    const newId = 'proj_' + Date.now();
+                    const uniqueTitle = getUniqueTitle(importedBasics['地段']);
+                    importedBasics['地段'] = uniqueTitle; // 確保專案內部的名稱也更新為不重複名稱
+
+                    const newProject = {
+                        id: newId,
+                        title: uniqueTitle,
+                        data: importedData,
+                        basics: importedBasics,
+                        date: new Date().toLocaleDateString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit' }),
+                        timestamp: Date.now() 
+                    };
+
+                    const projects = getProjects();
+                    projects.push(newProject);
+                    localStorage.setItem('brick_projects', JSON.stringify(projects));
+
+                    alert(`匯入成功！系統已將資料解析並重建為專案：【${uniqueTitle}】`);
+                    window.location.href = `test.html?id=${newId}`;
+
+                } catch (err) {
+                    console.error('解析 Excel 時發生錯誤:', err);
+                    alert('無法解析檔案，請確認是否為系統匯出的標準 Excel 檔案格式。');
+                }
+                
+                // 清除 input
+                event.target.value = '';
+            };
+            reader.readAsArrayBuffer(file);
+        }
+        // ==================== 專案動作功能 (包含圖層修正) ====================
+        
+        function toggleActionMenu(event, menuId) {
+            event.stopPropagation(); // 阻止點擊事件冒泡觸發進入專案
+            
+            const menu = document.getElementById(menuId);
+            const isShowing = menu.classList.contains('show');
+            
+            // 先關閉所有選單與重置所有卡片的 z-index
+            closeAllMenus();
+            
+            // 如果剛剛是關閉狀態，就把它打開並提升該卡片層級
+            if (!isShowing) {
+                menu.classList.add('show');
+                const card = menu.closest('.doc-card') || menu.closest('.list-row');
+                if (card) {
+                    card.classList.add('menu-active');
+                }
+            }
+        }
+
+        function closeAllMenus() {
+            document.querySelectorAll('.action-menu').forEach(menu => menu.classList.remove('show'));
+            // 移除所有卡片的層級提升
+            document.querySelectorAll('.doc-card, .list-row').forEach(card => card.classList.remove('menu-active'));
+        }
+
+        // 刪除專案
+        function deleteProject(event, id) {
+            event.stopPropagation();
+            if(!confirm("確定要刪除這個專案嗎？刪除後無法復原。")) return;
+            
+            let projects = getProjects();
+            projects = projects.filter(p => p.id !== id);
+            localStorage.setItem('brick_projects', JSON.stringify(projects));
+            renderDocs();
+        }
+
+        // 複製專案
+        function duplicateProject(event, id) {
+            event.stopPropagation();
+            const projects = getProjects();
+            const original = projects.find(p => p.id === id);
+            if(!original) return;
+
+            const newId = 'proj_' + Date.now();
+            const newTitle = getUniqueTitle(`${original.title} (複製)`);
+            
+            const newProject = {
+                id: newId,
+                title: newTitle,
+                data: JSON.parse(JSON.stringify(original.data)),
+                basics: JSON.parse(JSON.stringify(original.basics)),
+                date: new Date().toLocaleDateString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit' }),
+                timestamp: Date.now()
+            };
+            newProject.basics['地段'] = newTitle; 
+
+            projects.push(newProject);
+            localStorage.setItem('brick_projects', JSON.stringify(projects));
+            renderDocs();
+        }
+
+        // ── 匯出 Excel（開 popup 選項）──
+        let _exportProjectData = null;
+        let _exportProjectBasics = null;
+
+        function exportProject(event, id) {
+            event.stopPropagation();
+            closeAllMenus();
+            const projects = getProjects();
+            const proj = projects.find(p => p.id === id);
+            if (!proj) return;
+            // 暫存要匯出的專案資料
+            _exportProjectData   = proj.data   || {};
+            _exportProjectBasics = proj.basics  || {};
+            openExportModal();
+        }
+
+        function openExportModal() {
+            const modal  = document.getElementById('exportModal');
+            const colGrid = document.getElementById('columnToggleGrid');
+            const columns = {
+                "地段小段":"地段","所有權人":"所有權人","土地面積_m²":"土地面積_m²","土地面積_坪":"土地面積_坪",
+                "權利範圍(土地)":"土地面積_權利範圍","土地持分(坪)":"土地面積_土地持分面積(坪)","總土地比率":"土地面積_總土地比率",
+                "他項權利":"他項權利","前次現值":"前次取得_公告現值","前次年月":"前次取得_年月","當期現值":"當期公告現值",
+                "增值稅(自)":"增值稅預估(自用)","增值稅(般)":"增值稅預估(一般)","建物門牌":"建物門牌","建物持分(坪)":"持分面積_坪",
+                "所有權地址":"所有權地址","電話":"電話"
+            };
+            colGrid.innerHTML = '';
+            for (let name in columns) {
+                colGrid.innerHTML += `<label style="display:flex;gap:5px;cursor:pointer;"><input type="checkbox" checked class="col-toggle" data-key="${columns[name]}"> ${name}</label>`;
+            }
+            // 過濾下拉選項
+            const filterValSelect = document.getElementById('exportFilterValue');
+            filterValSelect.innerHTML = '';
+            document.getElementById('exportFilterType').value = 'all';
+            document.getElementById('exportFilterValueWrap').style.display = 'none';
+            modal.style.display = 'flex';
+        }
+
+        function closeExportModal() {
+            document.getElementById('exportModal').style.display = 'none';
+        }
+
+        function toggleExportFilterUI() {
+            const type   = document.getElementById('exportFilterType').value;
+            const wrap   = document.getElementById('exportFilterValueWrap');
+            const label  = document.getElementById('exportFilterLabel');
+            const select = document.getElementById('exportFilterValue');
+            if (type === 'all') { wrap.style.display = 'none'; return; }
+            wrap.style.display = 'block';
+            select.innerHTML = '';
+            const d = _exportProjectData || {};
+            if (type === 'land') {
+                label.innerText = '請選擇地號';
+                Object.keys(d).forEach(id => { select.innerHTML += `<option value="${id}">${id}</option>`; });
+            } else {
+                label.innerText = '請選擇所有權人';
+                const owners = new Set();
+                for (let id in d) (d[id]['所有權人'] || []).forEach(o => owners.add(o));
+                owners.forEach(o => { select.innerHTML += `<option value="${o}">${o}</option>`; });
+            }
+        }
+
+        function startAdvancedExport() {
+            const selectedSheets = Array.from(document.querySelectorAll('#sheetSelectGrid input:checked')).map(el => el.value);
+            const hiddenCols     = Array.from(document.querySelectorAll('.col-toggle:not(:checked)')).map(el => el.getAttribute('data-key'));
+            const filterConfig   = {
+                type:  document.getElementById('exportFilterType').value,
+                value: document.getElementById('exportFilterValue').value
+            };
+            const isPureValue = document.getElementById('exportPureValue').checked;
+            if (selectedSheets.length === 0) return alert('請至少選擇一個要輸出的工作表');
+
+            // 把專案資料掛到 window，讓 excel.js 能讀到
+            window.data   = _exportProjectData   || {};
+            window.basics = _exportProjectBasics || {};
+
+            closeExportModal();
+            try {
+                exportFancyExcelAdvanced({ isPureValue, selectedSheets, hiddenCols, filterConfig });
+            } catch (err) {
+                console.error(err);
+                alert('匯出過程發生錯誤：' + err.message);
+            }
+        }
+
+        // ==================== 渲染與排序 ====================
+
+        let isListView = false;
+        let currentSort = 'lastOpened';
+        let searchText = '';
+
+        const docsContainer = document.getElementById('docsContainer');
+        const listHeader = document.getElementById('listHeader');
+        const viewToggleBtn = document.getElementById('viewToggleBtn');
+        const sortBtn = document.getElementById('sortBtn');
+        const sortDropdown = document.getElementById('sortDropdown');
+        const searchInput = document.getElementById('searchInput');
+
+        function renderDocs() {
+            docsContainer.innerHTML = ''; 
+            docsContainer.className = isListView ? 'docs-list-container' : 'docs-grid';
+            listHeader.style.display = isListView ? 'flex' : 'none';
+
+            let projects = getProjects();
+            let filteredDocs = projects.filter(doc => doc.title.toLowerCase().includes(searchText.toLowerCase()));
+
+            filteredDocs.sort((a, b) => {
+                if (currentSort === 'title') {
+                    return a.title.localeCompare(b.title);
+                } else {
+                    return (b.timestamp || 0) - (a.timestamp || 0);
+                }
+            });
+
+            if (filteredDocs.length === 0) {
+                docsContainer.innerHTML = `<div style="padding: 40px; text-align: center; color: #888; width: 100%;">尚無專案，點擊上方按鈕建立新檔案。</div>`;
+                return;
+            }
+
+            filteredDocs.forEach(doc => {
+                const menuId = `menu_${doc.id}`;
+                
+                const actionMenuHtml = `
+                    <div class="menu-wrapper">
+                        <button class="icon-btn" onclick="toggleActionMenu(event, '${menuId}')">
+                            <span class="material-icons">more_vert</span>
+                        </button>
+                        <div class="action-menu" id="${menuId}">
+                            <div class="action-item" onclick="duplicateProject(event, '${doc.id}')"><i class="fa-solid fa-copy"></i> 複製專案</div>
+                            <div class="action-item" onclick="exportProject(event, '${doc.id}')"><i class="fa-solid fa-file-excel"></i> 匯出 Excel</div>
+                            <div class="action-item danger" onclick="deleteProject(event, '${doc.id}')"><i class="fa-solid fa-trash"></i> 刪除</div>
+                        </div>
+                    </div>
+                `;
+
+                if (isListView) {
+                    const row = document.createElement('div');
+                    row.className = 'list-row';
+                    row.onclick = () => openProject(doc.id);
+                    row.innerHTML = `
+                        <i class="fa-solid fa-shapes list-icon"></i>
+                        <div class="list-title">${doc.title}</div>
+                        <div class="list-date">${doc.date}</div>
+                        ${actionMenuHtml}
+                    `;
+                    docsContainer.appendChild(row);
+                } else {
+                    const card = document.createElement('div');
+                    card.className = 'doc-card';
+                    card.onclick = () => openProject(doc.id);
+                    // 修改後的程式碼
+                    // 在 index.html 的 renderDocs() 函數內：
+                    const previewHtml = doc.thumbnail 
+                        ? `<div class="doc-preview" style="padding: 0; overflow: hidden; height: 180px; width: 100%;">
+                            <img src="${doc.thumbnail}" style="width: 100%; height: 100%; object-fit: cover; object-position: top center; transition: transform 0.3s ease;">
+                        </div>`
+                        : `<div class="doc-preview"><i class="fa-solid fa-chart-pie"></i></div>`;
+
+                    card.innerHTML = `
+                        ${previewHtml}
+                        <div class="doc-info">
+                            <div>
+                                <div class="doc-title" title="${doc.title}">${doc.title}</div>
+                                <div class="doc-meta">最後修改: ${doc.date}</div>
+                            </div>
+                            ${actionMenuHtml}
+                        </div>
+                    `;
+                    docsContainer.appendChild(card);
+                }
+            });
+        }
+
+        viewToggleBtn.addEventListener('click', () => {
+            isListView = !isListView;
+            viewToggleBtn.innerHTML = isListView ? '<i class="material-icons">grid_view</i>' : '<i class="material-icons">list</i>';
+            renderDocs();
+        });
+
+        sortBtn.addEventListener('click', (e) => { e.stopPropagation(); sortDropdown.classList.toggle('show'); });
+
+        function setSort(sortType) {
+            currentSort = sortType;
+            document.querySelectorAll('.dropdown-item').forEach(item => {
+                item.classList.remove('active');
+                if (item.getAttribute('onclick').includes(sortType)) item.classList.add('active');
+            });
+            renderDocs();
+        }
+
+        searchInput.addEventListener('input', (e) => { searchText = e.target.value; renderDocs(); });
+
+        window.addEventListener('click', (e) => {
+            closeAllMenus();
+            if (sortDropdown.classList.contains('show')) sortDropdown.classList.remove('show');
+        });
+
+        renderDocs();
+    </script>
+</body>
+</html>
