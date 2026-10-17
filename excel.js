@@ -28,18 +28,23 @@ function getBuildScopeFraction(landData, idx) {
     if (numArr && denArr && numArr[idx] !== undefined) {
         return { num: numArr[idx], den: denArr[idx] || 1 };
     }
-    // fallback: convert decimal to fraction
+    // fallback: convert decimal to fraction（連分數逼近，1/3 不會變成 333333/1000000）
     const arr = landData['權利範圍'];
-    const dec = Array.isArray(arr) ? (arr[idx] || 0) : (arr || 0);
+    const dec = parseFloat(Array.isArray(arr) ? arr[idx] : arr) || 0;
     if (!dec) return { num: 0, den: 1 };
     if (dec === 1) return { num: 1, den: 1 };
-    // find fraction via continued fraction approximation
-    const precision = 1000000;
-    let num = Math.round(dec * precision);
-    let den = precision;
-    function gcdF(a, b) { a=Math.abs(a); b=Math.abs(b); while(b){let t=b;b=a%b;a=t;} return a; }
-    const g = gcdF(num, den);
-    return { num: num/g, den: den/g };
+    let h0 = 0, h1 = 1, k0 = 1, k1 = 0, b = dec;
+    for (let iter = 0; iter < 64; iter++) {
+        const a = Math.floor(b);
+        const h2 = a * h1 + h0, k2 = a * k1 + k0;
+        if (k2 > 100000000) break;
+        h0 = h1; h1 = h2; k0 = k1; k1 = k2;
+        if (Math.abs(dec - h1 / k1) <= 1e-12) break;
+        const frac = b - a;
+        if (frac < 1e-15) break;
+        b = 1 / frac;
+    }
+    return k1 ? { num: h1, den: k1 } : { num: Math.round(dec), den: 1 };
 }
 
 async function exportFancyExcelAdvanced(config) {
@@ -63,25 +68,41 @@ async function exportFancyExcelAdvanced(config) {
         for (let landId in data) {
             const original = data[landId];
             const indices = [];
-            
-            original["所有權人"].forEach((name, idx) => {
+
+            (original["所有權人"] || []).forEach((name, idx) => {
                 if (name === targetOwner) indices.push(idx);
             });
 
             if (indices.length > 0) {
                 const filteredLand = JSON.parse(JSON.stringify(original));
+                const pick = arr => indices.map(i => arr[i]);
                 const arrayKeys = [
-                    "所有權人", "年月", "公告現值", "增值稅預估(自用)", "增值稅預估(一般)", 
-                    "建號", "建物門牌", "樓層", "建物面積", "附屬建物用途", "附屬建物面積", "權利範圍", "所有權地址", 
-                    "增值稅試算(自用)", "增值稅試算(一般)"
+                    "所有權人", "年月", "公告現值", "增值稅預估(自用)", "增值稅預估(一般)",
+                    "建號", "建物門牌", "樓層", "建物面積", "附屬建物用途", "附屬建物面積", "權利範圍", "所有權地址",
+                    "增值稅試算(自用)", "增值稅試算(一般)",
+                    "權利範圍_num", "權利範圍_den", "持有減徵"   // ★ 修正：分子/分母也要一起篩，否則會套用到別人的持分
                 ];
                 arrayKeys.forEach(k => {
-                    filteredLand[k] = indices.map(i => original[k][i]);
+                    // ★ 修正：舊專案 / Excel 匯入的專案沒有「附屬建物」陣列，原本會直接當掉
+                    if (Array.isArray(original[k])) filteredLand[k] = pick(original[k]);
                 });
-                filteredLand["土地面積"]["權利範圍"] = indices.map(i => original["土地面積"]["權利範圍"][i]);
+                ["權利範圍", "權利範圍_num", "權利範圍_den"].forEach(k => {
+                    if (Array.isArray(original["土地面積"][k])) filteredLand["土地面積"][k] = pick(original["土地面積"][k]);
+                });
                 exportData[landId] = filteredLand;
             }
         }
+    }
+
+    // ★ 修正：還沒有所有權人的地號（例如剛從地籍截圖新增）會讓匯出當掉 → 先排除
+    for (const k of Object.keys(exportData)) {
+        if (!Array.isArray(exportData[k]['所有權人']) || exportData[k]['所有權人'].length === 0) {
+            console.warn(`地號 ${k} 尚無所有權人，不列入匯出`);
+            delete exportData[k];
+        }
+    }
+    if (Object.keys(exportData).length === 0) {
+        throw new Error('沒有可匯出的資料（地號尚未填入所有權人，或篩選條件沒有符合的資料）');
     }
 
     // 計算過濾後的總面積
@@ -176,16 +197,17 @@ async function exportFancyExcelAdvanced(config) {
             });
         }
 
+        // ★ 修正：AA 欄標題是「增值稅試算-一般」、AB 是「自用」，原本資料順序寫反了
         for(let num in exportData){
             let temp = [];
             const area = exportData[num]['土地面積']['面積'];
             for(let i = 0 ; i<exportData[num]['所有權人'].length ; i++){
                 const ratio = getExactScope(exportData[num], 'land', i);
                 if(isPureValue){
-                    temp.push(['','','',exportData[num]['所有權人'][i],'','',ratio,area*ratio,area*ratio*0.3025,area*ratio/total,'',exportData[num]['公告現值'][i],exportData[num]['年月'][i],'',exportData[num]['增值稅預估(自用)'][i],exportData[num]['增值稅預估(一般)'][i],exportData[num]['建號'][i],exportData[num]['建物門牌'][i],exportData[num]['樓層'][i],exportData[num]['建物面積'][i],exportData[num]['建物面積'][i]*0.3025,getExactScope(exportData[num], 'build', i),exportData[num]['建物面積'][i]*getExactScope(exportData[num], 'build', i),exportData[num]['建物面積'][i]*getExactScope(exportData[num], 'build', i)*0.3025,exportData[num]['所有權地址'][i],'',exportData[num]['增值稅試算(自用)'][i],exportData[num]['增值稅試算(一般)'][i]]);
+                    temp.push(['','','',exportData[num]['所有權人'][i],'','',ratio,area*ratio,area*ratio*0.3025,area*ratio/total,'',exportData[num]['公告現值'][i],exportData[num]['年月'][i],'',exportData[num]['增值稅預估(自用)'][i],exportData[num]['增值稅預估(一般)'][i],exportData[num]['建號'][i],exportData[num]['建物門牌'][i],exportData[num]['樓層'][i],exportData[num]['建物面積'][i],exportData[num]['建物面積'][i]*0.3025,getExactScope(exportData[num], 'build', i),exportData[num]['建物面積'][i]*getExactScope(exportData[num], 'build', i),exportData[num]['建物面積'][i]*getExactScope(exportData[num], 'build', i)*0.3025,exportData[num]['所有權地址'][i],'',exportData[num]['增值稅試算(一般)'][i],exportData[num]['增值稅試算(自用)'][i]]);
                 }
                 else{
-                    temp.push(['','','',exportData[num]['所有權人'][i],'','',ratio,{formula:`E${sheetA.rowCount+1}*G${sheetA.rowCount+1+i}`},{formula:`H${sheetA.rowCount+1+i}*0.3025`},{formula:`H${sheetA.rowCount+1+i}/SUM(H4:H9999)*2`},'',exportData[num]['公告現值'][i],exportData[num]['年月'][i],'',exportData[num]['增值稅預估(自用)'][i],exportData[num]['增值稅預估(一般)'][i],exportData[num]['建號'][i],exportData[num]['建物門牌'][i],exportData[num]['樓層'][i],exportData[num]['建物面積'][i],{formula:`T${sheetA.rowCount+1+i}*0.3025`},getExactScope(exportData[num], 'build', i),{formula:`T${sheetA.rowCount+1+i}*V${sheetA.rowCount+1+i}`},{formula:`W${sheetA.rowCount+1+i}*0.3025`},exportData[num]['所有權地址'][i],'',exportData[num]['增值稅試算(自用)'][i],exportData[num]['增值稅試算(一般)'][i]]);
+                    temp.push(['','','',exportData[num]['所有權人'][i],'','',ratio,{formula:`E${sheetA.rowCount+1}*G${sheetA.rowCount+1+i}`},{formula:`H${sheetA.rowCount+1+i}*0.3025`},{formula:`H${sheetA.rowCount+1+i}/SUM(H4:H9999)*2`},'',exportData[num]['公告現值'][i],exportData[num]['年月'][i],'',exportData[num]['增值稅預估(自用)'][i],exportData[num]['增值稅預估(一般)'][i],exportData[num]['建號'][i],exportData[num]['建物門牌'][i],exportData[num]['樓層'][i],exportData[num]['建物面積'][i],{formula:`T${sheetA.rowCount+1+i}*0.3025`},getExactScope(exportData[num], 'build', i),{formula:`T${sheetA.rowCount+1+i}*V${sheetA.rowCount+1+i}`},{formula:`W${sheetA.rowCount+1+i}*0.3025`},exportData[num]['所有權地址'][i],'',exportData[num]['增值稅試算(一般)'][i],exportData[num]['增值稅試算(自用)'][i]]);
                 }
             }
             temp[0][2] = num;
@@ -672,7 +694,7 @@ async function exportFancyExcelAdvanced(config) {
             if (sheetD.columnCount > 48) {
                 sheetD.spliceColumns(49, sheetD.columnCount - 48);
             }
-            sheetD.addRow([`${basics['地段']}土地清冊`]);
+            sheetD.addRow([`${basics['地段']}地主可分配面積`]); // ★ 修正：原本標題誤植為「土地清冊」
             let sheetArow2 = ['地段','小段','地號','所有權人','土地面積','','','','','','使用分區','基準容積率','建蔽率','基準容積面積(m²)','預估獎勵容積(m²)','','','','允建總容積(m²)','','合建基準容積分取','','合建獎勵容積分取','','預估分取總允建容積','','預估產權面積(坪)','預估車位數','建號','所有權人','門牌','原主建物面積(m²)','原主建物面積(坪)','附屬建物面積(m²)','附屬建物面積(坪)','持分','原建物總面積(m²)','原建物總面積(坪)','原建物總面積比例','原室內面積概算(坪)','合建分配後預估產權面積(坪)','預估分配主建物面積(坪)','預估分配公設面積(坪)','都更前後建物總產權差異(坪)','主建物差異(坪)','1樓換取2樓以上可分面積','1樓建物總產權差異(坪)','所有權人地址'];
             let sheetArow3 = ['','','','','m²','坪','權利範圍','土地持分面積(m²)','土地持分面積(坪)','總土地比率','','','','',basics['地主可分配面積']['預估獎勵容積(m²)'][0],basics['地主可分配面積']['預估獎勵容積(m²)'][1],basics['地主可分配面積']['預估獎勵容積(m²)'][2],basics['地主可分配面積']['預估獎勵容積(m²)'][3],'容積(m²)','總比率(%)',basics['地主可分配面積']['合建基準容積分取'][0],basics['地主可分配面積']['合建基準容積分取'][1],basics['地主可分配面積']['合建獎勵容積分取'][0],basics['地主可分配面積']['合建獎勵容積分取'][1],'m²','坪',basics['地主可分配面積']['預估產權面積(坪)'],basics['地主可分配面積']['預估車位數'],'','','','','','','','','','','','','','','','','','','',''];
             sheetD.addRow(sheetArow2);
@@ -734,8 +756,10 @@ async function exportFancyExcelAdvanced(config) {
                 sheetA.model.merges.forEach(range => {
                     const [startCell, endCell] = range.split(':');
                     const startRow = sheetA.getCell(startCell).row;
+                    const endRow = sheetA.getCell(endCell).row;
                     const endCol = sheetA.getCell(endCell).col;
-                    if (startRow >= 4 && endCol <= 10) {
+                    // ★ 修正：不要複製「總計」列的合併格，否則本頁最下面會多一列空白/0 的資料
+                    if (startRow >= 4 && endRow <= lastRow - 1 && endCol <= 10) {
                         try { sheetD.mergeCells(range); } catch (e) { }
                     }
                 });
@@ -754,23 +778,40 @@ async function exportFancyExcelAdvanced(config) {
 
             const ratioCell = sheetD.getCell('AA3');
             ratioCell.numFmt = '0.00"倍"';
-            
-            for(let j = 4 ; j<=sheetD.rowCount ; j++){
+
+            // ★ 修正（本段）：
+            //   T 總比率：本頁沒有合計列，原本 S*2/SUM(S) 會變成兩倍；純數字版原本除以「土地總面積」，單位不對
+            //   Y 預估分取總允建容積：應為 基準分取(U) + 獎勵分取(W)；原本 U+V，V 是 U 的合併格 → 公式版少算獎勵、純數字版變成 U×2
+            //   AB 預估車位數：純數字版原本沒有填
+            const dLastRow = lastRow - 1; // 清冊最後一列資料（不含總計列）
+            const num0 = v => (typeof v === 'number' && isFinite(v)) ? v : (parseFloat(v) || 0);
+            for(let j = 4 ; j<=dLastRow ; j++){
                 if(isPureValue){
-                    sheetD.getCell(`N${j}`).value = sheetD.getCell(`H${j}`).value*sheetD.getCell(`L${j}`).value;
-                    sheetD.getCell(`O${j}`).value = sheetD.getCell(`O3`).value*sheetD.getCell(`N${j}`).value;
-                    sheetD.getCell(`P${j}`).value = sheetD.getCell(`P3`).value*sheetD.getCell(`N${j}`).value;
-                    sheetD.getCell(`Q${j}`).value = sheetD.getCell(`Q3`).value*sheetD.getCell(`N${j}`).value;
-                    sheetD.getCell(`R${j}`).value = sheetD.getCell(`R3`).value*sheetD.getCell(`N${j}`).value;
-                    sheetD.getCell(`S${j}`).value = sheetD.getCell(`N${j}`).value+sheetD.getCell(`O${j}`).value+sheetD.getCell(`P${j}`).value+sheetD.getCell(`Q${j}`).value+sheetD.getCell(`R${j}`).value;
-                    sheetD.getCell(`T${j}`).value = sheetD.getCell(`S${j}`).value/total;
+                    const N = num0(sheetD.getCell(`H${j}`).value) * num0(sheetD.getCell(`L${j}`).value);
+                    const O = num0(sheetD.getCell('O3').value) * N;
+                    const P = num0(sheetD.getCell('P3').value) * N;
+                    const Q = num0(sheetD.getCell('Q3').value) * N;
+                    const R = num0(sheetD.getCell('R3').value) * N;
+                    const S = N + O + P + Q + R;
+                    const U = num0(sheetD.getCell('V3').value) * N;
+                    const W = num0(sheetD.getCell('X3').value) * O;
+                    const Y = U + W;
+                    const Z = Y * 0.3025;
+                    const AA = num0(sheetD.getCell('AA3').value) * Z;
+                    sheetD.getCell(`N${j}`).value = N;
+                    sheetD.getCell(`O${j}`).value = O;
+                    sheetD.getCell(`P${j}`).value = P;
+                    sheetD.getCell(`Q${j}`).value = Q;
+                    sheetD.getCell(`R${j}`).value = R;
+                    sheetD.getCell(`S${j}`).value = S;
                     sheetD.mergeCells(`U${j}:V${j}`);
-                    sheetD.getCell(`U${j}`).value = sheetD.getCell(`V3`).value*sheetD.getCell(`N${j}`).value;
+                    sheetD.getCell(`U${j}`).value = U;
                     sheetD.mergeCells(`W${j}:X${j}`);
-                    sheetD.getCell(`W${j}`).value = sheetD.getCell(`X3`).value*sheetD.getCell(`O${j}`).value;
-                    sheetD.getCell(`Y${j}`).value = sheetD.getCell(`U${j}`).value+sheetD.getCell(`V${j}`).value;
-                    sheetD.getCell(`Z${j}`).value = sheetD.getCell(`Y${j}`).value*0.3025;
-                    sheetD.getCell(`AA${j}`).value = sheetD.getCell(`AA3`).value*sheetD.getCell(`Z${j}`).value;
+                    sheetD.getCell(`W${j}`).value = W;
+                    sheetD.getCell(`Y${j}`).value = Y;
+                    sheetD.getCell(`Z${j}`).value = Z;
+                    sheetD.getCell(`AA${j}`).value = AA;
+                    sheetD.getCell(`AB${j}`).value = num0(sheetD.getCell('AB3').value) * AA;
                 }
                 else{
                     sheetD.getCell(`N${j}`).value = {formula: `H${j}*L${j}`};
@@ -779,21 +820,22 @@ async function exportFancyExcelAdvanced(config) {
                     sheetD.getCell(`Q${j}`).value = {formula: `Q3*N${j}`};
                     sheetD.getCell(`R${j}`).value = {formula: `R3*N${j}`};
                     sheetD.getCell(`S${j}`).value = {formula: `N${j}+O${j}+P${j}+Q${j}+R${j}`};
-                    sheetD.getCell(`T${j}`).value = {formula: `S${j}*2/SUM(S4:S9999)`};
+                    sheetD.getCell(`T${j}`).value = {formula: `IF(SUM(S$4:S$${dLastRow})=0,0,S${j}/SUM(S$4:S$${dLastRow}))`};
                     sheetD.mergeCells(`U${j}:V${j}`);
                     sheetD.getCell(`U${j}`).value = {formula: `V3*N${j}`};
                     sheetD.mergeCells(`W${j}:X${j}`);
                     sheetD.getCell(`W${j}`).value = {formula: `X3*O${j}`};
-                    sheetD.getCell(`Y${j}`).value = {formula: `U${j}+V${j}`};
+                    sheetD.getCell(`Y${j}`).value = {formula: `U${j}+W${j}`};
                     sheetD.getCell(`Z${j}`).value = {formula: `Y${j}*0.3025`};
                     sheetD.getCell(`AA${j}`).value = {formula: `AA3*Z${j}`};
+                    sheetD.getCell(`AB${j}`).value = {formula: `AB3*AA${j}`};
                 }
             }
-
-            // ── AB 欄：預估車位數（公式） ──
-            if (!isPureValue) {
-                for (let j = 4; j <= sheetD.rowCount; j++) {
-                    sheetD.getCell(`AB${j}`).value = {formula: `AB3*AA${j}`};
+            if (isPureValue) {
+                let sumS = 0;
+                for (let j = 4; j <= dLastRow; j++) sumS += num0(sheetD.getCell(`S${j}`).value);
+                for (let j = 4; j <= dLastRow; j++) {
+                    sheetD.getCell(`T${j}`).value = sumS ? num0(sheetD.getCell(`S${j}`).value) / sumS : 0;
                 }
             }
 
