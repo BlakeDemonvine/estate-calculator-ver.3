@@ -322,6 +322,18 @@
             return JSON.parse(localStorage.getItem('brick_projects') || '[]');
         }
 
+        // ★ 修正：瀏覽器儲存空間滿了時給明確提示（原本 Excel 匯入會誤報「無法解析檔案」）
+        function saveProjects(projects) {
+            try {
+                localStorage.setItem('brick_projects', JSON.stringify(projects));
+                return true;
+            } catch (err) {
+                console.error(err);
+                alert('⚠ 瀏覽器儲存空間已滿，無法儲存。\n請先刪除不需要的專案（或匯出 Excel 備份後刪除）再試一次。');
+                return false;
+            }
+        }
+
         function getUniqueTitle(baseTitle) {
             const projects = getProjects();
             let title = baseTitle;
@@ -351,7 +363,7 @@
 
             const projects = getProjects();
             projects.push(newProject);
-            localStorage.setItem('brick_projects', JSON.stringify(projects));
+            if (!saveProjects(projects)) return;
             window.location.href = `test.html?id=${newId}`;
         }
 
@@ -391,13 +403,21 @@
                     };
 
                     // 小幫手：安全獲取儲存格的數值 (包含處理 Excel 公式格)
+                    // ★ 修正：沒有計算結果的公式格、Excel 存檔後的「格式化文字」原本會讀成 "[object Object]"
                     const getVal = (sheet, r, c) => {
                         if (!sheet) return '';
-                        let cell = sheet.getCell(r, c);
-                        let val = cell.value;
-                        if (val && typeof val === 'object' && val.result !== undefined) return val.result;
-                        return val === null ? '' : val;
+                        const val = sheet.getCell(r, c).value;
+                        if (val === null || val === undefined) return '';
+                        if (typeof val === 'object' && !(val instanceof Date)) {
+                            if (Array.isArray(val.richText)) return val.richText.map(t => t.text).join('');
+                            if (val.result !== undefined) return val.result ?? '';
+                            if (val.formula !== undefined || val.sharedFormula !== undefined || val.error !== undefined) return '';
+                            if (val.text !== undefined) return val.text;
+                        }
+                        return val;
                     };
+                    // ★ 修正：原本用 `|| 預設值`，參數若是 0（例如沒有防災都更獎勵）會被換成預設值
+                    const numOr = (v, d) => { const n = parseFloat(v); return isNaN(n) ? d : n; };
 
                     // --- 2. 還原 Basics 物件 ---
                     importedBasics['地段'] = getVal(sheetA, 4, 1) || '匯入專案';
@@ -418,13 +438,13 @@
                     }
 
                     if (sheetC) {
-                        importedBasics['土地歸戶表']['合計法定容積']     = parseFloat(getVal(sheetC, 3, 8))  || 2.25;
-                        importedBasics['土地歸戶表']['地主法定容積佔比'] = parseFloat(getVal(sheetC, 3, 9))  || 0.58;
-                        importedBasics['土地歸戶表']['都更獎勵容積']     = parseFloat(getVal(sheetC, 3, 10)) || 0.5;
-                        importedBasics['土地歸戶表']['地主獎勵容積佔比'] = parseFloat(getVal(sheetC, 3, 11)) || 0.5;
-                        importedBasics['土地歸戶表']['防災都更獎勵容積'] = parseFloat(getVal(sheetC, 3, 12)) || 0.3;
-                        importedBasics['土地歸戶表']['地主防災都更佔比'] = parseFloat(getVal(sheetC, 3, 13)) || 0.5;
-                        importedBasics['土地歸戶表']['合建分取']         = parseFloat(getVal(sheetC, 3, 14)) || 1.58;
+                        importedBasics['土地歸戶表']['合計法定容積']     = numOr(getVal(sheetC, 3, 8),  2.25);
+                        importedBasics['土地歸戶表']['地主法定容積佔比'] = numOr(getVal(sheetC, 3, 9),  0.58);
+                        importedBasics['土地歸戶表']['都更獎勵容積']     = numOr(getVal(sheetC, 3, 10), 0.5);
+                        importedBasics['土地歸戶表']['地主獎勵容積佔比'] = numOr(getVal(sheetC, 3, 11), 0.5);
+                        importedBasics['土地歸戶表']['防災都更獎勵容積'] = numOr(getVal(sheetC, 3, 12), 0.3);
+                        importedBasics['土地歸戶表']['地主防災都更佔比'] = numOr(getVal(sheetC, 3, 13), 0.5);
+                        importedBasics['土地歸戶表']['合建分取']         = numOr(getVal(sheetC, 3, 14), 1.58);
                     }
 
                     // --- 3. 還原 Data 物件 ---
@@ -447,12 +467,13 @@
                                     "他項權利": String(getVal(sheetA, i, 11) || ""),
                                     "公告現值": [], "年月": [], "當期公告現值": parseFloat(getVal(sheetA, i, 14)) || 0,
                                     "增值稅預估(自用)": [], "增值稅預估(一般)": [], "建號": [], "建物門牌": [], "樓層": [],
-                                    "建物面積": [], "權利範圍": [], "所有權地址": [],
+                                    "建物面積": [], "附屬建物用途": [], "附屬建物面積": [],
+                                    "權利範圍": [], "所有權地址": [],
                                     "電話": String(getVal(sheetA, i, 26) || ""),
                                     "增值稅試算(自用)": [], "增值稅試算(一般)": [],
                                     "使用分區": sheetD ? String(getVal(sheetD, i, 11) || '商') : '商',
-                                    "基準容積率": sheetD ? (parseFloat(getVal(sheetD, i, 12)) || 4.4) : 4.4,
-                                    "建蔽率": sheetD ? (parseFloat(getVal(sheetD, i, 13)) || 0.7) : 0.7
+                                    "基準容積率": sheetD ? numOr(getVal(sheetD, i, 12), 4.4) : 4.4,
+                                    "建蔽率": sheetD ? numOr(getVal(sheetD, i, 13), 0.7) : 0.7
                                 };
                             }
                         }
@@ -506,6 +527,9 @@
                         }
                         importedData[currentLandNo]["樓層"].push(_importFloor);
                         importedData[currentLandNo]["建物面積"].push(parseFloat(getVal(sheetA, i, 20)) || "");
+                        // 附屬建物面積在「地主可分配面積」AH 欄（第 34 欄）
+                        importedData[currentLandNo]["附屬建物用途"].push("");
+                        importedData[currentLandNo]["附屬建物面積"].push(sheetD ? (parseFloat(getVal(sheetD, i, 34)) || "") : "");
                         
                         // 處理建物權利範圍
                         let bScopeVal = getVal(sheetA, i, 22);
@@ -538,7 +562,7 @@
 
                     const projects = getProjects();
                     projects.push(newProject);
-                    localStorage.setItem('brick_projects', JSON.stringify(projects));
+                    if (!saveProjects(projects)) { event.target.value = ''; return; }
 
                     alert(`匯入成功！系統已將資料解析並重建為專案：【${uniqueTitle}】`);
                     window.location.href = `test.html?id=${newId}`;
@@ -587,7 +611,7 @@
             
             let projects = getProjects();
             projects = projects.filter(p => p.id !== id);
-            localStorage.setItem('brick_projects', JSON.stringify(projects));
+            saveProjects(projects);
             renderDocs();
         }
 
@@ -612,7 +636,7 @@
             newProject.basics['地段'] = newTitle; 
 
             projects.push(newProject);
-            localStorage.setItem('brick_projects', JSON.stringify(projects));
+            saveProjects(projects);
             renderDocs();
         }
 
@@ -693,12 +717,13 @@
             window.basics = _exportProjectBasics || {};
 
             closeExportModal();
-            try {
-                exportFancyExcelAdvanced({ isPureValue, selectedSheets, hiddenCols, filterConfig });
-            } catch (err) {
-                console.error(err);
-                alert('匯出過程發生錯誤：' + err.message);
-            }
+            // ★ 修正：exportFancyExcelAdvanced 是 async，try/catch 接不到它的錯誤
+            Promise.resolve()
+                .then(() => exportFancyExcelAdvanced({ isPureValue, selectedSheets, hiddenCols, filterConfig }))
+                .catch(err => {
+                    console.error(err);
+                    alert('匯出過程發生錯誤：' + err.message);
+                });
         }
 
         // ==================== 渲染與排序 ====================
