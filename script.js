@@ -107,7 +107,7 @@ function parseDateToApiKey(dateStr) {
     return `${year}-M${month}`; // API key 格式：不補零，e.g. "1981-M1" 而非 "1981-M01"
 }
 
-/** 取 CPI 資料中最新可用的 key（退至多 3 個月） */
+/** 取 CPI 資料中最新可用的 key（先找近 6 個月；找不到就用資料裡最新的月份） */
 function getLatestCpiKey(cpiData) {
     const now = new Date();
     for (let offset = 0; offset <= 6; offset++) {
@@ -116,19 +116,94 @@ function getLatestCpiKey(cpiData) {
         const val = cpiData[key];
         if (val != null && val > 0 && isFinite(val)) return key;
     }
-    return null;
+    // ★ 修正：API 連不上時，靜態表只到 2025/12，原本會回傳 null 導致增值稅完全無法計算
+    let best = null, bestN = -1;
+    for (const [key, val] of Object.entries(cpiData)) {
+        const m = key.match(/^(\d{4})-M(\d{1,2})$/);
+        if (!m || !(val > 0) || !isFinite(val)) continue;
+        const n = (+m[1]) * 12 + (+m[2]);
+        if (n > bestN) { bestN = n; best = key; }
+    }
+    if (best) console.warn(`CPI：近 6 個月沒有資料，改用最新可用月份 ${best}`);
+    return best;
+}
+
+/** 某個 CPI 月份是否已超過 6 個月（代表 API 沒取到最新資料） */
+function isCpiKeyStale(key) {
+    const m = (key || '').match(/^(\d{4})-M(\d{1,2})$/);
+    if (!m) return true;
+    const now = new Date();
+    return (now.getFullYear() * 12 + now.getMonth() + 1) - ((+m[1]) * 12 + (+m[2])) > 6;
 }
 
 /**
- * 核心計算（財政部三級累進稅率，無持有年限減徵）
+ * 一般用地稅率速算公式（土地稅法第33條；a = 漲價總數額，b = 按物價指數調整後之前次移轉現值總額）
+ *
+ *  持有年限          第一級(<1倍)   第二級(1~2倍)        第三級(≥2倍)
+ *  20年以下          a×20%         a×30% − b×10%        a×40% − b×30%
+ *  超過20年（減20%） a×20%         a×28% − b×8%         a×36% − b×24%
+ *  超過30年（減30%） a×20%         a×27% − b×7%         a×34% − b×21%
+ *  超過40年（減40%） a×20%         a×26% − b×6%         a×32% − b×18%
+ *
+ *  （長期持有只減徵「超過最低稅率 20% 的部分」，所以第一級不受影響；自用住宅 10% 也不受影響）
+ */
+const GENERAL_TAX_TABLE = {
+    0:   { t2: [0.30, 0.10], t3: [0.40, 0.30] },
+    0.2: { t2: [0.28, 0.08], t3: [0.36, 0.24] },
+    0.3: { t2: [0.27, 0.07], t3: [0.34, 0.21] },
+    0.4: { t2: [0.26, 0.06], t3: [0.32, 0.18] },
+};
+
+/**
+ * 依「前次移轉年月」推算持有年限與長期持有減徵率（土地稅法第33條第6~8項）
+ * 持有年限算到「申報移轉現值之日」，這裡以今天當作申報日。
+ * 謄本只有年月沒有日：月數差 > 240 一定「超過20年」；剛好在門檻附近（±1個月）會標示提醒，
+ * 可在編輯視窗的「長期持有減徵」手動指定。
+ * @returns {{months:number, years:number, restMonths:number, rate:number, nearBoundary:boolean} | null}
+ */
+function getHoldingInfo(dateStr, asOf = new Date()) {
+    const key = parseDateToApiKey(dateStr);
+    if (!key) return null;
+    const [y, m] = key.split('-M').map(Number);
+    const months = (asOf.getFullYear() * 12 + asOf.getMonth() + 1) - (y * 12 + m);
+    if (!isFinite(months) || months < 0) return null;
+    let rate = 0;
+    if (months > 480) rate = 0.4;
+    else if (months > 360) rate = 0.3;
+    else if (months > 240) rate = 0.2;
+    const nearBoundary = [240, 241, 360, 361, 480, 481].includes(months);
+    return { months, years: Math.floor(months / 12), restMonths: months % 12, rate, nearBoundary };
+}
+
+/** 決定要用的減徵率：手動指定（'' = 自動）優先，否則依持有年限 */
+function resolveHoldingRate(override, dateStr) {
+    const o = (override === '' || override == null) ? NaN : parseFloat(override);
+    if (GENERAL_TAX_TABLE[o] !== undefined) return { rate: o, manual: true, info: getHoldingInfo(dateStr) };
+    const info = getHoldingInfo(dateStr);
+    return { rate: info ? info.rate : 0, manual: false, info };
+}
+
+function describeHolding(h) {
+    const pct = Math.round(h.rate * 100);
+    const len = h.info ? `持有約 ${h.info.years} 年${h.info.restMonths ? ` ${h.info.restMonths} 個月` : ''}` : '';
+    const what = pct ? `長期持有減徵 ${pct}%` : '未達長期持有減徵';
+    return `${what}${h.manual ? '（手動指定）' : (len ? `（${len}）` : '')}`;
+}
+
+/** 物價指數取到小數 1 位（與財政部公告的「消費者物價總指數－稅務專用」表一致） */
+function roundCpi(v) { return Math.round(v * 10) / 10; }
+
+/**
+ * 核心計算（財政部三級累進稅率＋長期持有減徵）
  * @param {number} currentValue    當期公告現值（元/m²）
  * @param {number} prevValue       前次公告現值（元/m²）
  * @param {number} totalArea       宗地面積（m²）
  * @param {number} scopeNum        移轉持分分子
  * @param {number} scopeDen        移轉持分分母
  * @param {number} cpiRatio        消費者物價總指數（%，e.g. 209.5）
+ * @param {number} reductionRate   長期持有減徵率：0 / 0.2 / 0.3 / 0.4
  */
-function calcTaxCore({ currentValue, prevValue, totalArea, scopeNum, scopeDen, cpiRatio }) {
+function calcTaxCore({ currentValue, prevValue, totalArea, scopeNum, scopeDen, cpiRatio, reductionRate = 0 }) {
     const ratio = scopeNum / scopeDen;
 
     // 申報現值總額（取公告現值）
@@ -140,31 +215,31 @@ function calcTaxCore({ currentValue, prevValue, totalArea, scopeNum, scopeDen, c
     // 漲價總數額 (a)
     const priceIncrease = declaredTotal - adjustedPrev;
 
+    const rate = GENERAL_TAX_TABLE[reductionRate] ? reductionRate : 0;
+
     if (priceIncrease <= 0) {
-        return { selfUseTax: 0, generalTax: 0, priceIncrease: 0, adjustedPrev, declaredTotal, cpiRatio, times: 0 };
+        return { selfUseTax: 0, generalTax: 0, priceIncrease: 0, adjustedPrev, declaredTotal, cpiRatio, times: 0, tier: 0, reductionRate: rate };
     }
 
     // 漲價倍數
     const times = priceIncrease / adjustedPrev;
 
-    // 自用住宅用地：一律 10%
+    // 自用住宅用地：一律 10%（不適用長期持有減徵）
     const selfUseTax = Math.max(0, Math.round(priceIncrease * 0.10));
 
-    // 一般用地：三級累進（財政部標準，無持有年限減徵）
-    // 第一級：times < 1 → 20%
-    // 第二級：1 ≤ times < 2 → 30%，扣除 b×10%
-    // 第三級：times ≥ 2 → 40%，扣除 b×30%
-    let generalTax;
+    // 一般用地：三級累進 ＋ 長期持有減徵（★ 原本沒有減徵，持有超過 20 年的土地會算太多）
+    const coef = GENERAL_TAX_TABLE[rate];
+    let generalTax, tier;
     if (times < 1) {
-        generalTax = priceIncrease * 0.20;
+        tier = 1; generalTax = priceIncrease * 0.20;
     } else if (times < 2) {
-        generalTax = priceIncrease * 0.30 - adjustedPrev * 0.10;
+        tier = 2; generalTax = priceIncrease * coef.t2[0] - adjustedPrev * coef.t2[1];
     } else {
-        generalTax = priceIncrease * 0.40 - adjustedPrev * 0.30;
+        tier = 3; generalTax = priceIncrease * coef.t3[0] - adjustedPrev * coef.t3[1];
     }
     generalTax = Math.max(0, Math.round(generalTax));
 
-    return { selfUseTax, generalTax, priceIncrease, adjustedPrev, declaredTotal, cpiRatio, times };
+    return { selfUseTax, generalTax, priceIncrease, adjustedPrev, declaredTotal, cpiRatio, times, tier, reductionRate: rate };
 }
 
 /**
@@ -184,9 +259,14 @@ async function autoCalcTax(btn) {
     const currentValue = parseFloat(document.getElementById('editCurrentValue102').value) || 0;
     const totalArea    = parseFloat(document.getElementById('editTotalArea').value) || 0;
 
-    // 手動覆蓋欄位（保留但不強制）
+    // 手動覆蓋欄位（選填）
     const manualCpiEl  = card.querySelector('.input-manual-cpi');
     const manualCpiRaw = manualCpiEl ? parseFloat(manualCpiEl.value) : NaN;
+    const holdSel      = card.querySelector('.input-hold-reduce');
+    const holding      = resolveHoldingRate(holdSel ? holdSel.value : '', dateStr);
+    const tierName     = r => r.tier ? `第${['', '一', '二', '三'][r.tier]}級` : '未漲價';
+    const boundaryNote = (!holding.manual && holding.info && holding.info.nearBoundary)
+        ? '<br>⚠ 持有年限剛好在 20/30/40 年門檻附近，請依實際取得日確認，必要時用「長期持有減徵」手動指定' : '';
 
     if (!dateStr)      return setStatus('⚠ 請填寫前次取得年月', '#e67e22');
     if (!prevValue)    return setStatus('⚠ 請填寫前次公告現值', '#e67e22');
@@ -195,14 +275,15 @@ async function autoCalcTax(btn) {
 
     btn.disabled = true;
 
-    // 若使用者手動填了 CPI，優先採用（方便特殊情況覆蓋）
+    // 若使用者手動填了物價指數，優先採用（可直接填稅務機關公告的數字，結果會完全一致）
     if (!isNaN(manualCpiRaw) && manualCpiRaw > 0) {
-        const result = calcTaxCore({ currentValue, prevValue, totalArea, scopeNum, scopeDen, cpiRatio: manualCpiRaw });
+        const result = calcTaxCore({ currentValue, prevValue, totalArea, scopeNum, scopeDen, cpiRatio: manualCpiRaw, reductionRate: holding.rate });
         card.querySelector('.input-tax-self').value      = result.selfUseTax;
         card.querySelector('.input-tax-gen').value       = result.generalTax;
         card.querySelector('.input-calc-tax-self').value = result.selfUseTax;
         card.querySelector('.input-calc-tax-gen').value  = result.generalTax;
-        setStatus(`✅ 計算完成（手動CPI）｜物價總指數 ${manualCpiRaw.toFixed(2)}%｜漲價倍數 ${result.times.toFixed(2)}`, '#27ae60');
+        setStatus(`✅ 計算完成（手動物價指數）｜物價總指數 ${manualCpiRaw}%｜漲價倍數 ${result.times.toFixed(2)}（${tierName(result)}）｜${describeHolding(holding)}${boundaryNote}`,
+            boundaryNote ? '#c47d00' : '#27ae60');
         btn.disabled = false;
         return;
     }
@@ -242,22 +323,21 @@ async function autoCalcTax(btn) {
         // 因 CPI_STATIC 定義 = (2026/2月CPI) / (該月CPI) × 100
         // 所以：prevCPI/currCPI = cpiData[currKey] / cpiData[prevKey]  ← 注意分子分母
         // → cpiRatio = cpiData[prevKey] / cpiData[currKey] × 100
-        const cpiRatio = (cpiData[prevKey] / cpiData[currKey]) * 100;
+        // 取到小數 1 位，和稅務機關公告的物價指數表格式相同
+        const cpiRatio = roundCpi((cpiData[prevKey] / cpiData[currKey]) * 100);
 
-        const isBefore1981 = prevYear < 1981;
-        const sourceNote   = isBefore1981 ? '（靜態表）' : '（API）';
-
-        const result = calcTaxCore({ currentValue, prevValue, totalArea, scopeNum, scopeDen, cpiRatio });
+        const result = calcTaxCore({ currentValue, prevValue, totalArea, scopeNum, scopeDen, cpiRatio, reductionRate: holding.rate });
 
         card.querySelector('.input-tax-self').value      = result.selfUseTax;
         card.querySelector('.input-tax-gen').value       = result.generalTax;
         card.querySelector('.input-calc-tax-self').value = result.selfUseTax;
         card.querySelector('.input-calc-tax-gen').value  = result.generalTax;
 
+        const staleNote = isCpiKeyStale(currKey) ? '<br>⚠ 主計總處 API 未取得最新月份，當期物價指數暫用最新可用月份，結果可能略有誤差' : '';
         setStatus(
-            `✅ 計算完成${sourceNote}｜物價總指數 ${cpiRatio.toFixed(2)}%｜漲價倍數 ${result.times.toFixed(2)}｜` +
-            `參考月份：${prevKey} → ${currKey}`,
-            '#27ae60'
+            `✅ 計算完成｜物價總指數 ${cpiRatio.toFixed(1)}%（${prevKey} → ${currKey}）｜` +
+            `漲價倍數 ${result.times.toFixed(2)}（${tierName(result)}）｜${describeHolding(holding)}${staleNote}${boundaryNote}`,
+            (staleNote || boundaryNote) ? '#c47d00' : '#27ae60'
         );
     } catch (err) {
         setStatus(`❌ 錯誤：${err.message}`, '#e74c3c');
@@ -286,15 +366,19 @@ async function autoCalcAllTax() {
  * 謄本匯入後靜默批次計算：直接操作 data 物件
  * 民國48年以後全部自動計算（靜態表涵蓋民國48~114年，API 補最新月份）
  */
-async function autoCalcAllTaxSilent() {
+async function autoCalcAllTaxSilent(landIds) {
     let cpiData = null;
-    try { cpiData = await fetchCPIData(); } catch(e) { console.warn('CPI 載入失敗，跳過自動計算', e); return; }
+    try { cpiData = await fetchCPIData(); } catch(e) { console.warn('CPI 載入失敗，跳過自動計算', e); return 0; }
 
     const currKey = getLatestCpiKey(cpiData);
-    if (!currKey) return;
+    if (!currKey) return 0;
     const currCpiOds = cpiData[currKey]; // 以 2026/2月基期的當期值
+    let count = 0;
 
-    for (const landId in data) {
+    // ★ 只計算指定的地號（例如這次匯入的），避免覆蓋其他地號手動填過的增值稅
+    const ids = Array.isArray(landIds) ? landIds.filter(id => data[id]) : Object.keys(data);
+
+    for (const landId of ids) {
         const record = data[landId];
         const owners  = record['所有權人'] || [];
         const area    = record['土地面積']?.['面積'] || 0;
@@ -318,14 +402,18 @@ async function autoCalcAllTaxSilent() {
             // cpiRatio = prevCPI / currCPI × 100
             // 因兩者都是「2026/2月基期」格式：值越大代表當時物價越低（年代越久遠）
             // prevCPI/currCPI = cpiData[prevKey] / cpiData[currKey]
-            const cpiRatio = (cpiData[prevKey] / currCpiOds) * 100;
+            const cpiRatio = roundCpi((cpiData[prevKey] / currCpiOds) * 100);
+            // 長期持有減徵：使用者在編輯視窗手動指定的優先，否則依前次移轉年月自動判斷
+            const holding = resolveHoldingRate((record['持有減徵'] || [])[i], dateStr);
 
+            // ★ 修正：原本 fallback 用 round(scope*1000)/1000，小持分（如 23/10000）誤差可達 10% 以上
             const scopeNums = record['土地面積']?.['權利範圍_num'];
             const scopeDens = record['土地面積']?.['權利範圍_den'];
-            const sNum = (scopeNums && scopeNums[i]) ? scopeNums[i] : Math.round(scope * 1000);
-            const sDen = (scopeDens && scopeDens[i]) ? scopeDens[i] : 1000;
+            const hasFrac = scopeNums && scopeDens && scopeNums[i] != null && scopeDens[i];
+            const sNum = hasFrac ? scopeNums[i] : scope;
+            const sDen = hasFrac ? scopeDens[i] : 1;
 
-            const result = calcTaxCore({ currentValue: currVal, prevValue: prevVal, totalArea: area, scopeNum: sNum, scopeDen: sDen, cpiRatio });
+            const result = calcTaxCore({ currentValue: currVal, prevValue: prevVal, totalArea: area, scopeNum: sNum, scopeDen: sDen, cpiRatio, reductionRate: holding.rate });
 
             if (!Array.isArray(record['增值稅預估(自用)'])) record['增值稅預估(自用)'] = new Array(owners.length).fill('');
             if (!Array.isArray(record['增值稅預估(一般)'])) record['增值稅預估(一般)'] = new Array(owners.length).fill('');
@@ -336,14 +424,16 @@ async function autoCalcAllTaxSilent() {
             record['增值稅預估(一般)'][i] = result.generalTax;
             record['增值稅試算(自用)'][i]  = result.selfUseTax;
             record['增值稅試算(一般)'][i]  = result.generalTax;
+            count++;
         }
     }
 
     refreshAllTaxBadges();
+    return count;
 }
 
 /**
- * 從「年/月」字串自動計算至今持有年限（僅供參考，不影響稅率）
+ * 從「年/月」字串自動計算至今持有年限（舊函式，稅率判斷請用 getHoldingInfo）
  */
 function autoCalcHoldingYears(dateStr) {
     if (!dateStr) return 0;
@@ -400,14 +490,49 @@ function gcd(a, b) {
 }
 
 // --- 輔助函式：將小數轉換為最簡分數 ---
-function decimalToFraction(decimal) {
-    if (!decimal || decimal === 0) return { num: 0, den: 1 };
-    if (decimal === 1) return { num: 1, den: 1 };
-    let precision = 1000000;
-    let num = Math.round(decimal * precision);
-    let den = precision;
-    let commonDivisor = gcd(num, den);
-    return { num: num / commonDivisor, den: den / commonDivisor };
+// ★ 修正：改用連分數逼近。原本固定 ×1000000，1/3 會變成 333333/1000000，存檔後就再也回不去
+function decimalToFraction(decimal, maxDen = 100000000) {
+    const x = parseFloat(decimal);
+    if (!x || !isFinite(x)) return { num: 0, den: 1 };
+    if (x === 1) return { num: 1, den: 1 };
+    let h0 = 0, h1 = 1, k0 = 1, k1 = 0, b = x;
+    for (let iter = 0; iter < 64; iter++) {
+        const a = Math.floor(b);
+        const h2 = a * h1 + h0, k2 = a * k1 + k0;
+        if (k2 > maxDen) break;
+        h0 = h1; h1 = h2; k0 = k1; k1 = k2;
+        if (Math.abs(x - h1 / k1) <= 1e-12 * Math.max(1, Math.abs(x))) break;
+        const frac = b - a;
+        if (frac < 1e-15) break;
+        b = 1 / frac;
+    }
+    if (!k1) return { num: Math.round(x), den: 1 };
+    return { num: h1, den: k1 };
+}
+
+// --- 輔助函式：取得權利範圍分數（優先用存下來的精確分子/分母） ---
+function getScopeFraction(decimal, nums, dens, i) {
+    const d = parseFloat(decimal) || 0;
+    if (Array.isArray(nums) && Array.isArray(dens) && nums[i] != null && dens[i]) {
+        const n = parseFloat(nums[i]), dd = parseFloat(dens[i]);
+        if (isFinite(n) && isFinite(dd) && dd && Math.abs(n / dd - d) < 1e-9) return { num: n, den: dd };
+    }
+    return decimalToFraction(d);
+}
+
+// --- 輔助函式：建物權利範圍（小數），沒有分子/分母時改用小數欄位 ---
+function getBuildScopeValue(rec, i) {
+    const n = rec['權利範圍_num'], d = rec['權利範圍_den'];
+    if (Array.isArray(n) && Array.isArray(d) && n[i] != null && d[i]) return n[i] / d[i];
+    const v = Array.isArray(rec['權利範圍']) ? rec['權利範圍'][i] : rec['權利範圍'];
+    const f = parseFloat(v);
+    return isNaN(f) ? 1 : f;
+}
+
+// --- 輔助函式：「今日不再顯示」用的本地日期 key（原本用 UTC，台灣早上 8 點前會算成前一天） ---
+function taxWarningKey() {
+    const d = new Date();
+    return 'taxWarningSuppressed_' + `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 // --- 2. 初始化 ---
@@ -433,7 +558,8 @@ document.addEventListener("DOMContentLoaded", function() {
 // --- 3. 頁面切換邏輯 ---
 function show(input){
     content.innerHTML = '';
-    content.className = 'canvas-area'; 
+    content.className = 'canvas-area';
+    content.style.cssText = ''; // ★ 修正：清掉 A 頁設定的 flex/padding，避免殘留到其他分頁
     document.getElementById('globalSummary').classList.add('hidden-bar');
     
     Object.keys(charts).forEach(id => {
@@ -448,7 +574,8 @@ function show(input){
     // Section A：匯入謄本（Google Vision OCR）
     // ══════════════════════════════════════════════════════════════
     if(input === 'A'){
-        content.style.cssText = 'display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; padding:40px 20px; gap:0;';
+        // 用 margin:auto 置中（justify-content:center 在內容超過高度時會把上方切掉）
+        content.style.cssText = 'display:flex; flex-direction:column; align-items:center; padding:40px 20px; gap:0;';
 
         if (!document.getElementById('ocr-keyframes')) {
             const st = document.createElement('style');
@@ -461,7 +588,7 @@ function show(input){
 
         const card = document.createElement('div');
         card.id = 'ocr-upload-card';
-        card.style.cssText = 'background:white; border-radius:20px; box-shadow:0 8px 40px rgba(125,42,232,0.08); border:1px solid #f0eaff; padding:36px 40px; width:100%; max-width:480px; display:flex; flex-direction:column; gap:20px;';
+        card.style.cssText = 'background:white; border-radius:20px; box-shadow:0 8px 40px rgba(125,42,232,0.08); border:1px solid #f0eaff; padding:36px 40px; width:100%; max-width:480px; display:flex; flex-direction:column; gap:20px; margin:auto 0;';
 
         card.innerHTML = `
           <div style="text-align:center; padding-bottom:4px;">
@@ -505,6 +632,9 @@ function show(input){
 
         content.appendChild(card);
 
+        // 地籍圖資截圖匯入區塊（easymap.js）
+        if (window.EasymapImport) EasymapImport.mountUploadZone(card);
+
         document.getElementById('gv-key-toggle').addEventListener('click', () => {
             const inp = document.getElementById('gv-key-input');
             inp.type = inp.type === 'password' ? 'text' : 'password';
@@ -527,8 +657,11 @@ function show(input){
             dz.style.borderColor = '#e8e0ff';
             dz.style.background = '#fdfcff';
             dz.querySelector('i').style.color = '#c4b5fd';
-            const files = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf');
+            const all = Array.from(e.dataTransfer.files);
+            const files = all.filter(f => f.type === 'application/pdf');
+            const images = all.filter(f => /^image\//.test(f.type));
             if (files.length) triggerOcr(files);
+            else if (images.length && window.EasymapImport) EasymapImport.handleImageFiles(images); // 圖片 → 地籍截圖匯入
         });
         dz.addEventListener('click', () => document.getElementById('ocr-file-input').click());
         document.getElementById('ocr-select-btn').addEventListener('click', () => document.getElementById('ocr-file-input').click());
@@ -621,7 +754,7 @@ function show(input){
                     personData[name] = { name: name, lands: [], totalAreaM2: 0, totalPing: 0, totalTaxSelf: 0, totalTaxGen: 0 };
                 }
                 let area = record['土地面積']['面積'] || 0;
-                let scope = Array.isArray(record['土地面積']['權利範圍']) ? record['土地面積']['權利範圍'][i] : record['土地面積']['權利範圍'];
+                let scope = parseFloat(Array.isArray(record['土地面積']['權利範圍']) ? record['土地面積']['權利範圍'][i] : record['土地面積']['權利範圍']) || 0;
                 let heldM2 = area * scope;
                 let heldPing = heldM2 * PING_FACTOR;
                 let taxSelf = parseFloat(Array.isArray(record['增值稅預估(自用)']) ? record['增值稅預估(自用)'][i] : record['增值稅預估(自用)']) || 0;
@@ -665,14 +798,13 @@ function show(input){
         document.getElementById('globalSummary').classList.add('hidden-bar');
 
         // 確保 basics['土地歸戶表'] 有新的參數欄位
+        // ★ 修正：原本用 !tbl[...] 判斷，使用者設成 0（例如沒有防災都更）會被重設回預設值
         const tbl = basics['土地歸戶表'] || {};
-        if (!tbl['合計法定容積']) tbl['合計法定容積'] = 2.25;
-        if (!tbl['地主法定容積佔比']) tbl['地主法定容積佔比'] = 0.58;
-        if (!tbl['都更獎勵容積']) tbl['都更獎勵容積'] = 0.5;
-        if (!tbl['地主獎勵容積佔比']) tbl['地主獎勵容積佔比'] = 0.5;
-        if (!tbl['防災都更獎勵容積']) tbl['防災都更獎勵容積'] = 0.3;
-        if (!tbl['地主防災都更佔比']) tbl['地主防災都更佔比'] = 0.5;
-        if (!tbl['合建分取']) tbl['合建分取'] = 1.58;
+        const D_DEFAULTS = { '合計法定容積': 2.25, '地主法定容積佔比': 0.58, '都更獎勵容積': 0.5, '地主獎勵容積佔比': 0.5,
+                             '防災都更獎勵容積': 0.3, '地主防災都更佔比': 0.5, '合建分取': 1.58 };
+        for (const k in D_DEFAULTS) {
+            if (tbl[k] == null || tbl[k] === '' || isNaN(tbl[k])) tbl[k] = D_DEFAULTS[k];
+        }
         basics['土地歸戶表'] = tbl;
 
         const inputStyle = 'width:72px;padding:7px 10px;border:1.5px solid #e0d5f7;border-radius:8px;font-size:13px;font-weight:600;color:#333;text-align:center;outline:none;';
@@ -888,7 +1020,7 @@ function show(input){
                 #e-page .e-stat.purple { background:linear-gradient(135deg,#f4efff,#ede0ff); border-color:#d0b8f8; }
                 #e-page .e-stat.teal   { background:linear-gradient(135deg,#e6fafa,#ccf2f2); border-color:#99e0e0; }
                 #e-page .e-stat.amber  { background:linear-gradient(135deg,#fff8e8,#ffefc7); border-color:#ffd97a; }
-                #e-page .e-stat.green  { background:linear-gradient(135deg,#e8f8f1,#cceed e); border-color:#88d9b4; }
+                #e-page .e-stat.green  { background:linear-gradient(135deg,#e8f8f1,#cceede); border-color:#88d9b4; }
                 #e-page .e-stat.rose   { background:linear-gradient(135deg,#fff0f0,#ffd6d6); border-color:#ffaaaa; }
                 #e-page .e-stat-label { font-size:10px; color:#999; font-weight:700; letter-spacing:0.8px; text-transform:uppercase; margin-bottom:3px; }
                 #e-page .e-stat-value { font-size:18px; font-weight:800; color:#1a1a2e; font-variant-numeric:tabular-nums; }
@@ -1015,9 +1147,8 @@ function show(input){
                     if (!pd.lands.includes(landId)) pd.lands.push(landId);
                     const bArea  = parseFloat((rec['建物面積']||[])[i])||0;
                     const bSub   = parseFloat((rec['附屬建物面積']||[])[i])||0;
-                    const bsNum  = rec['權利範圍_num'] ? (rec['權利範圍_num'][i]||1) : 1;
-                    const bsDen  = rec['權利範圍_den'] ? (rec['權利範圍_den'][i]||1) : 1;
-                    const bScope = bsNum / bsDen;
+                    // ★ 修正：沒有分子/分母時（Excel 匯入、手動新增）原本一律當 1/1，改用小數權利範圍
+                    const bScope = getBuildScopeValue(rec, i);
                     pd.origMainM2    += bArea;
                     pd.origSubM2     += bSub;
                     pd.origIndoorPing += (bArea + bSub) * bScope * PING_FACTOR;
@@ -1225,6 +1356,7 @@ async function startOcrImport(files, apiKey) {
 
     // ── 主流程 ──
     let allText = '';
+    let okPages = 0, firstError = null;
 
     for (let fi = 0; fi < files.length; fi++) {
         const file = files[fi];
@@ -1239,7 +1371,10 @@ async function startOcrImport(files, apiKey) {
                 cMapUrl: 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/cmaps/',
                 cMapPacked: true
             }).promise;
-        } catch(e) { continue; }
+        } catch(e) {
+            if (!firstError) firstError = new Error(`無法開啟「${file.name}」：${e.message}`);
+            continue;
+        }
 
         const numPages = pdf.numPages;
 
@@ -1268,8 +1403,10 @@ async function startOcrImport(files, apiKey) {
                 const b64 = cvs.toDataURL('image/png').split(',')[1];
                 const text = await callGoogleVision(apiKey, b64);
                 pageTexts[idx] = text || '';
-                setChip(chipId, text ? 'done' : 'done');
+                okPages++;
+                setChip(chipId, 'done');
             } catch(e) {
+                if (!firstError) firstError = e;
                 setChip(chipId, 'error');
             }
             done++;
@@ -1281,16 +1418,28 @@ async function startOcrImport(files, apiKey) {
         allText += pageTexts.map((t, i) => `\n--- Page ${i+1} ---\n${t}`).join('') + '\n';
     }
 
+    // ★ 修正：全部頁面都失敗（例如 API Key 錯誤）時，原本會默默跳到空白的清冊頁
+    if (okPages === 0) {
+        alert(`謄本辨識失敗：${firstError ? firstError.message : '沒有可辨識的頁面'}`);
+        show('A');
+        return;
+    }
+    if (firstError) console.warn('部分頁面辨識失敗：', firstError);
+
     const ocrResult = extractTranscriptData(allText);
-    convertOcrToProjectData(ocrResult);
+    const touchedLands = convertOcrToProjectData(ocrResult);
 
     if (typeof window.saveProjectToLocal === 'function') window.saveProjectToLocal();
 
     const bar = document.getElementById('ocr-bar');
     if (bar) bar.style.width = '100%';
 
-    // 謄本匯入後：自動批次計算所有可算的增值稅
-    await autoCalcAllTaxSilent();
+    if (touchedLands.length === 0) {
+        alert('沒有從謄本中辨識到土地資料，請確認上傳的是「土地登記謄本」PDF。');
+    }
+
+    // 謄本匯入後：自動計算這次匯入地號的增值稅（不覆蓋其他地號手動填的值）
+    await autoCalcAllTaxSilent(touchedLands);
 
     if (typeof window.saveProjectToLocal === 'function') window.saveProjectToLocal();
 
@@ -1307,7 +1456,14 @@ async function startOcrImport(files, apiKey) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-async function callGoogleVision(apiKey, base64, attempt = 1) {
+/** 回傳純文字（謄本 PDF 用） */
+async function callGoogleVision(apiKey, base64) {
+    const ann = await callGoogleVisionRaw(apiKey, base64);
+    return (ann?.fullTextAnnotation?.text || ann?.textAnnotations?.[0]?.description || '').trim();
+}
+
+/** 回傳完整辨識結果（含每個字的位置，地籍截圖匯入用） */
+async function callGoogleVisionRaw(apiKey, base64, attempt = 1) {
     const MAX = 4;
     let resp;
     try {
@@ -1324,14 +1480,14 @@ async function callGoogleVision(apiKey, base64, attempt = 1) {
             }
         );
     } catch(e) {
-        if (attempt < MAX) { await sleep(1000 * attempt); return callGoogleVision(apiKey, base64, attempt+1); }
+        if (attempt < MAX) { await sleep(1000 * attempt); return callGoogleVisionRaw(apiKey, base64, attempt+1); }
         throw new Error(`網路錯誤：${e.message}`);
     }
 
     // 429 / 403 → 速率限制，自動重試
-    if (resp.status === 429 || (resp.status === 403 && attempt < MAX)) {
+    if ((resp.status === 429 || resp.status === 403) && attempt < MAX) {
         await sleep(1500 * attempt);
-        return callGoogleVision(apiKey, base64, attempt+1);
+        return callGoogleVisionRaw(apiKey, base64, attempt+1);
     }
 
     if (!resp.ok) {
@@ -1345,7 +1501,7 @@ async function callGoogleVision(apiKey, base64, attempt = 1) {
     const result = await resp.json();
     const ann = result.responses?.[0];
     if (ann?.error) throw new Error(`Vision API：${ann.error.message}`);
-    return (ann?.fullTextAnnotation?.text || ann?.textAnnotations?.[0]?.description || '').trim();
+    return ann || {};
 }
 
 async function runConcurrent(tasks, concurrency) {
@@ -1526,6 +1682,7 @@ function mergeOwners(target, incoming) {
 // ══════════════════════════════════════════════════════════════
 
 function convertOcrToProjectData(ocrResult) {
+    const touched = new Set();
     // 第一輪：土地謄本
     for (const key in ocrResult) {
         const entry = ocrResult[key];
@@ -1533,6 +1690,7 @@ function convertOcrToProjectData(ocrResult) {
 
         const landId = entry.號碼;
         if (!landId) continue;
+        touched.add(landId);
 
         if (!data[landId]) {
             data[landId] = {
@@ -1620,8 +1778,10 @@ function convertOcrToProjectData(ocrResult) {
             if (!data[landNo]["權利範圍_den"]) data[landNo]["權利範圍_den"] = new Array(data[landNo]["所有權人"].length).fill(1);
             data[landNo]["權利範圍_num"][idx] = bScopeNum;
             data[landNo]["權利範圍_den"][idx] = bScopeDen;
+            touched.add(landNo);
         }
     }
+    return Array.from(touched);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1719,6 +1879,12 @@ function updateCenterTotal(chartId) {
 function newNum() {
     if (document.getElementById('newNumModal')) return;
     document.body.insertAdjacentHTML('beforeend', `<div id="newNumModal" class="modal-overlay"><div class="modal-content" style="width: 380px;"><div class="modal-header"><h3>新增地號</h3><button class="close-btn" onclick="closeNewNumModal()">&times;</button></div><div class="modal-body"><div class="form-group"><label class="field-label">* 地號</label><input type="text" id="newLandIdInput" placeholder="8888"></div><div class="form-group"><label class="field-label">* 土地總面積 (m²)</label><input type="number" id="newLandAreaInput" placeholder="100" step="0.01"></div><div class="form-group"><label class="field-label">* 所有權人姓名</label><input type="text" id="newOwnerNameInput" placeholder="王小明"></div><p id="newNumError" style="color:#d93025; display:none;"></p></div><div class="modal-footer"><button class="btn-cancel" onclick="closeNewNumModal()">取消</button><button class="btn-save" onclick="confirmNewNum()">確定</button></div></div></div>`);
+    const m = document.getElementById('newNumModal');
+    m.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); confirmNewNum(); }
+        else if (e.key === 'Escape') closeNewNumModal();
+    });
+    setTimeout(() => document.getElementById('newLandIdInput').focus(), 0);
 }
 
 function closeNewNumModal() { const m = document.getElementById('newNumModal'); if(m) m.remove(); }
@@ -1727,7 +1893,14 @@ function confirmNewNum() {
     const id   = document.getElementById('newLandIdInput').value.trim();
     const area = parseFloat(document.getElementById('newLandAreaInput').value) || 0;
     const name = document.getElementById('newOwnerNameInput').value.trim();
-    if (!id || area <= 0 || !name) return;
+    const errEl = document.getElementById('newNumError');
+    const fail = msg => { errEl.textContent = msg; errEl.style.display = 'block'; };
+    if (!id)       return fail('請輸入地號');
+    if (area <= 0) return fail('請輸入大於 0 的土地面積');
+    if (!name)     return fail('請輸入所有權人姓名');
+    // ★ 修正：原本地號重複會直接覆蓋掉既有地號（連同所有權人）
+    const dup = data[id] ? id : (window.EasymapImport ? EasymapImport.findLandKeyByText(id) : null);
+    if (dup) return fail(`地號「${dup}」已存在，請直接在該地號按「編輯」新增所有權人`);
     data[id] = { '所有權人': [name], '土地面積': {'面積': area, '權利範圍': [1]}, '他項權利': '', '公告現值': [''], '年月': [''], '當期公告現值': 0, '增值稅預估(自用)': [''], '增值稅預估(一般)': [''], '建號': [''], '建物門牌': [''], '樓層': [''], '建物面積': [''], '附屬建物用途': [''], '附屬建物面積': [''], '權利範圍': [''], '所有權地址': [''], '電話': '', '增值稅試算(自用)': [''], '增值稅試算(一般)': [''], '使用分區': "商", '基準容積率': 4.4, '建蔽率': 0.7 };
     if(typeof window.saveProjectToLocal === 'function') window.saveProjectToLocal();
     closeNewNumModal();
@@ -1754,12 +1927,13 @@ function openEditModal(id) {
     const listContainer = document.getElementById('ownerList');
     listContainer.innerHTML = ''; 
 
-    const owners = record['所有權人'];
+    const owners = record['所有權人'] || [];
     for(let i=0; i < owners.length; i++) {
+        // ★ 修正：優先用存下來的精確分子/分母（原本一律由小數反推，1/3 會顯示成 333333/1000000）
         const landScopeVal  = Array.isArray(record['土地面積']['權利範圍']) ? record['土地面積']['權利範圍'][i] : record['土地面積']['權利範圍'];
-        const landFrac = decimalToFraction(landScopeVal);
+        const landFrac = getScopeFraction(landScopeVal, record['土地面積']['權利範圍_num'], record['土地面積']['權利範圍_den'], i);
         const buildScopeVal = Array.isArray(record['權利範圍']) ? record['權利範圍'][i] : record['權利範圍'];
-        const buildFrac = decimalToFraction(parseFloat(buildScopeVal) || 0);
+        const buildFrac = getScopeFraction(buildScopeVal, record['權利範圍_num'], record['權利範圍_den'], i);
 
         addOwnerRow({
             name: owners[i],
@@ -1777,9 +1951,12 @@ function openEditModal(id) {
             subBuildArea: (record['附屬建物面積'] || [])[i] || '',
             ownerAddr: record['所有權地址'][i] || '',
             calcTaxSelf: record['增值稅試算(自用)'][i] || '',
-            calcTaxGen:  record['增值稅試算(一般)'][i] || ''
+            calcTaxGen:  record['增值稅試算(一般)'][i] || '',
+            holdReduce:  (record['持有減徵'] || [])[i]
         });
     }
+    // 地號還沒有所有權人（例如剛從地籍截圖匯入）→ 先放一張空白卡片
+    if (owners.length === 0) addOwnerRow({});
     document.getElementById('editModal').style.display = 'flex';
 }
 
@@ -1812,7 +1989,7 @@ function addOwnerRow(inputData = {}, isNew = false) {
             <div><span class="field-label">持分比例 (%)</span><input type="text" class="input-held-ratio" readonly style="border:none;background:transparent;"></div>
         </div>
         <div class="grid-2-col" style="margin-bottom:15px;">
-            <div><span class="field-label">年月</span><input type="text" class="input-date" value="${d.date || ''}"></div>
+            <div><span class="field-label">年月</span><input type="text" class="input-date" value="${d.date || ''}" oninput="updateHoldingHint(this)"></div>
             <div><span class="field-label">公告現值</span><input type="number" class="input-value" value="${d.value || ''}"></div>
         </div>
         <div style="margin-bottom:12px;background:linear-gradient(135deg,#f0f4ff,#faf0ff);border:1px solid #d8c8f8;border-radius:8px;padding:8px 12px;">
@@ -1820,15 +1997,25 @@ function addOwnerRow(inputData = {}, isNew = false) {
                 <span style="font-size:12px;font-weight:700;color:#7d2ae8;">⚡ 土地增值稅自動計算</span>
                 <button type="button" class="btn-auto-calc-tax" onclick="autoCalcTax(this)" style="background:linear-gradient(135deg,#7d2ae8,#00c4cc);color:white;border:none;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:5px;flex-shrink:0;"><i class="fa-solid fa-calculator"></i> 自動計算</button>
             </div>
-            <div class="manual-cpi-block" style="display:none;margin-top:8px;padding:8px;background:#fff8e1;border:1px solid #ffe082;border-radius:6px;">
-                <div style="font-size:11px;color:#795548;margin-bottom:6px;">📋 前次移轉早於民國70年，請至 <a href="https://www.stat.gov.tw/cp.aspx?n=2665" target="_blank" style="color:#7d2ae8;font-weight:600;">主計總處第四點「各年月為基期之消費者物價總指數－稅務專用」</a> 查詢後手動填入：</div>
-                <div style="display:flex;align-items:center;gap:8px;">
-                    <label style="font-size:12px;color:#555;white-space:nowrap;">消費者物價總指數</label>
-                    <input type="number" class="input-manual-cpi" placeholder="例：209.50" step="0.01" min="0" style="width:120px;padding:4px 8px;border:1px solid #bbb;border-radius:4px;font-size:13px;">
-                    <span style="font-size:11px;color:#888;">%（填入後再按自動計算）</span>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:8px;">
+                <div>
+                    <span class="field-label" style="font-size:11px;margin-bottom:3px;">長期持有減徵（一般稅率）</span>
+                    <select class="input-hold-reduce" onchange="updateHoldingHint(this)" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;background:white;">
+                        <option value="">自動（依前次移轉年月）</option>
+                        <option value="0">不減徵（20年以下）</option>
+                        <option value="0.2">減徵 20%（超過20年）</option>
+                        <option value="0.3">減徵 30%（超過30年）</option>
+                        <option value="0.4">減徵 40%（超過40年）</option>
+                    </select>
+                    <div class="hold-hint" style="font-size:11px;color:#888;margin-top:3px;min-height:14px;"></div>
+                </div>
+                <div>
+                    <span class="field-label" style="font-size:11px;margin-bottom:3px;">物價指數 %（選填）</span>
+                    <input type="number" class="input-manual-cpi" placeholder="空白＝自動帶入" step="0.1" min="0" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:12px;">
+                    <div style="font-size:11px;color:#888;margin-top:3px;">可填稅務機關公告的數值</div>
                 </div>
             </div>
-            <div class="tax-calc-status" style="font-size:11px;color:#888;line-height:1.5;"></div>
+            <div class="tax-calc-status" style="font-size:11px;color:#888;line-height:1.5;margin-top:6px;"></div>
         </div>
         <div class="grid-2-col" style="margin-bottom:24px;border-bottom:1px dashed #ddd;padding-bottom:15px;">
             <div><span class="field-label">增值稅預估(自用)</span><input type="number" class="input-tax-self" value="${d.taxSelf || ''}"></div>
@@ -1871,9 +2058,34 @@ function addOwnerRow(inputData = {}, isNew = false) {
         </div>
     `;
     document.getElementById('ownerList').appendChild(div);
+    const holdSel = div.querySelector('.input-hold-reduce');
+    holdSel.value = (d.holdReduce === '' || d.holdReduce == null) ? '' : String(d.holdReduce);
+    if (holdSel.selectedIndex < 0) holdSel.value = '';
+    updateHoldingHint(holdSel);
     calculateRow(div.querySelector('.input-scope-num'));
     calculateBuildingRow(div.querySelector('.input-build-area'));
     if (isNew) div.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+/** 顯示「持有約 N 年 → 減徵 X%」的提示（年月或下拉選單變動時更新） */
+function updateHoldingHint(el) {
+    const card = el && el.closest('.owner-card');
+    if (!card) return;
+    const hint = card.querySelector('.hold-hint');
+    if (!hint) return;
+    const sel = card.querySelector('.input-hold-reduce');
+    const dateStr = card.querySelector('.input-date').value.trim();
+    const info = getHoldingInfo(dateStr);
+    if (!info) { hint.textContent = dateStr ? '年月格式無法辨識（例：69/8）' : ''; hint.style.color = '#888'; return; }
+    const autoPct = Math.round(info.rate * 100);
+    const len = `持有約 ${info.years} 年${info.restMonths ? ` ${info.restMonths} 個月` : ''}`;
+    if (sel && sel.value !== '') {
+        hint.textContent = `${len}（自動判斷為${autoPct ? `減徵 ${autoPct}%` : '不減徵'}）`;
+        hint.style.color = '#888';
+    } else {
+        hint.textContent = `${len} → ${autoPct ? `減徵 ${autoPct}%` : '不減徵'}${info.nearBoundary ? '　⚠ 接近門檻，請確認' : ''}`;
+        hint.style.color = info.nearBoundary ? '#c47d00' : '#7d2ae8';
+    }
 }
 
 function calculateGlobalLayout() {
@@ -1914,7 +2126,9 @@ function saveEdit() {
     if (newArea <= 0) return alert("土地面積需大於 0");
 
     const rows = document.querySelectorAll('.owner-card');
-    let o=[], s=[], d=[], v=[], ts=[], tg=[], bn=[], ba=[], fl=[], b_area=[], bs=[], oa=[], cts=[], ctg=[], sbu=[], sba=[];
+    // 空白的增值稅欄位保留為空白（原本存成 0，紅色「尚未填入」提醒就會消失）
+    const numOrBlank = el => { const s = (el.value || '').trim(); if (s === '') return ''; const n = parseFloat(s); return isNaN(n) ? '' : n; };
+    let o=[], s=[], d=[], v=[], ts=[], tg=[], bn=[], ba=[], fl=[], b_area=[], bs=[], oa=[], cts=[], ctg=[], sbu=[], sba=[], hr=[];
     let _landScopeNums=[], _landScopeDens=[], _buildScopeNums=[], _buildScopeDens=[];
 
     rows.forEach(row => {
@@ -1927,9 +2141,9 @@ function saveEdit() {
             _landScopeNums.push(_sNum);
             _landScopeDens.push(_sDen);
             d.push(row.querySelector('.input-date').value);
-            v.push(parseInt(row.querySelector('.input-value').value) || 0);
-            ts.push(parseInt(row.querySelector('.input-tax-self').value) || 0);
-            tg.push(parseInt(row.querySelector('.input-tax-gen').value) || 0);
+            v.push(parseFloat(row.querySelector('.input-value').value) || 0); // 原本 parseInt 會砍掉小數（如 1234.5 元）
+            ts.push(numOrBlank(row.querySelector('.input-tax-self')));
+            tg.push(numOrBlank(row.querySelector('.input-tax-gen')));
             bn.push(row.querySelector('.input-build-no').value);
             ba.push(row.querySelector('.input-build-addr').value);
             fl.push(row.querySelector('.input-floor').value);
@@ -1942,8 +2156,10 @@ function saveEdit() {
             oa.push(row.querySelector('.input-owner-addr').value);
             sbu.push(row.querySelector('.input-sub-build-use').value || '');
             sba.push(parseFloat(row.querySelector('.input-sub-build-area').value) || 0);
-            cts.push(parseInt(row.querySelector('.input-calc-tax-self').value) || 0);
-            ctg.push(parseInt(row.querySelector('.input-calc-tax-gen').value) || 0);
+            cts.push(numOrBlank(row.querySelector('.input-calc-tax-self')));
+            ctg.push(numOrBlank(row.querySelector('.input-calc-tax-gen')));
+            const _hr = row.querySelector('.input-hold-reduce');
+            hr.push(_hr && _hr.value !== '' ? parseFloat(_hr.value) : ''); // '' = 自動
         }
     });
 
@@ -1963,6 +2179,7 @@ function saveEdit() {
     record['建號']=bn; record['建物門牌']=ba; record['樓層']=flAutoFilled; record['建物面積']=b_area; record['附屬建物用途']=sbu; record['附屬建物面積']=sba; record['權利範圍']=bs;
     record['權利範圍_num']=_buildScopeNums; record['權利範圍_den']=_buildScopeDens; record['所有權地址']=oa;
     record['增值稅試算(自用)']=cts; record['增值稅試算(一般)']=ctg;
+    record['持有減徵']=hr;
 
     if(charts[`chart_${currentEditingId}`]) {
         const c = charts[`chart_${currentEditingId}`];
@@ -1987,7 +2204,6 @@ function showMissingTaxWarning(missingLands, onIgnore) {
 
     const landList = missingLands.slice(0, 8).map(id => `<span style="display:inline-block;background:#fdecea;color:#c0392b;border:1px solid #f5c6c6;border-radius:4px;padding:2px 8px;margin:2px;font-size:12px;font-weight:600;">${id}</span>`).join('');
     const moreText = missingLands.length > 8 ? `<span style="font-size:12px;color:#999;"> 等共 ${missingLands.length} 筆...</span>` : '';
-    const todayKey = 'taxWarningSuppressed_' + new Date().toISOString().slice(0, 10);
 
     const overlay = document.createElement('div');
     overlay.id = 'taxWarningOverlay';
@@ -2013,7 +2229,7 @@ function showMissingTaxWarning(missingLands, onIgnore) {
                     ${landList}${moreText}
                 </div>
                 <p style="color:#888;font-size:12px;line-height:1.6;margin-bottom:20px;">
-                    💡 若前次移轉早於民國70年，請至編輯視窗手動填入消費者物價總指數後計算。
+                    💡 可到編輯視窗按「自動計算」，或填入稅務機關公告的物價指數後再計算。
                 </p>
                 <!-- 今日不再顯示 -->
                 <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:20px;">
@@ -2043,8 +2259,7 @@ function ignoreTaxWarning() {
     const overlay = document.getElementById('taxWarningOverlay');
     const suppress = document.getElementById('taxWarningSuppressToday')?.checked;
     if (suppress) {
-        const todayKey = 'taxWarningSuppressed_' + new Date().toISOString().slice(0, 10);
-        localStorage.setItem(todayKey, '1');
+        try { localStorage.setItem(taxWarningKey(), '1'); } catch (e) {}
     }
     const cb = overlay?._onIgnore;
     overlay?.remove();
@@ -2057,8 +2272,9 @@ function updateGlobalSummary() {
         let l = data[id];
         let area = l['土地面積']['面積'] || 0;
         let val  = l['當期公告現值'] || 0;
-        let s    = Array.isArray(l['土地面積']['權利範圍']) ? l['土地面積']['權利範圍'].reduce((a,b)=>a+b,0) : (l['土地面積']['權利範圍']||0);
-        tArea += area * s; tVal += val * s; 
+        let s    = Array.isArray(l['土地面積']['權利範圍']) ? l['土地面積']['權利範圍'].reduce((a,b)=>a+(parseFloat(b)||0),0) : (parseFloat(l['土地面積']['權利範圍'])||0);
+        // ★ 修正：公告現值是「元/m²」，總額要乘上面積（原本只乘持分，顯示的是單價加總）
+        tArea += area * s; tVal += val * area * s;
     }
     document.getElementById('sumHeldArea').innerText = tArea.toFixed(2);
     document.getElementById('sumHeldPing').innerText = (tArea * PING_FACTOR).toFixed(2);
@@ -2071,7 +2287,7 @@ function updateGlobalSummary() {
 
 async function captureThumbnail() {
     const gridB = document.getElementById('gridB');
-    if (!gridB || currentProjectIndex === -1) return;
+    if (!gridB || !projectId || typeof html2canvas !== 'function') return;
     try {
         const canvas = await html2canvas(gridB, { scale: 1, useCORS: true, logging: false, backgroundColor: '#ebecf0' });
         const thumbCanvas = document.createElement('canvas');
@@ -2081,12 +2297,14 @@ async function captureThumbnail() {
         thumbCanvas.width = targetWidth;
         thumbCanvas.height = canvas.height * scale;
         ctx.drawImage(canvas, 0, 0, thumbCanvas.width, thumbCanvas.height);
+        // ★ 修正：用專案 id 找（原本用開頁時的 index，另一個分頁刪了專案就會寫到別的專案上）
         const projects = JSON.parse(localStorage.getItem('brick_projects') || '[]');
-        if(projects[currentProjectIndex]) {
-            projects[currentProjectIndex].thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.5);
+        const proj = projects.find(p => p.id === projectId);
+        if (proj) {
+            proj.thumbnail = thumbCanvas.toDataURL('image/jpeg', 0.5);
             localStorage.setItem('brick_projects', JSON.stringify(projects));
         }
-    } catch (err) { console.error('背景截圖失敗:', err); }
+    } catch (err) { console.warn('背景截圖失敗（不影響資料）:', err); }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -2110,8 +2328,8 @@ function openExportModal() {
         colGrid.innerHTML += `<label style="display:flex;gap:5px;cursor:pointer;"><input type="checkbox" checked class="col-toggle" data-key="${columns[name]}"> ${name}</label>`;
     }
 
-    const filterValSelect = document.getElementById('exportFilterValue');
-    filterValSelect.innerHTML = '';
+    // ★ 修正：原本只清空下拉選單、沒重設過濾模式，第二次打開會變成「指定地號」但沒有選項 → 匯出空檔
+    toggleExportFilterUI();
     modal.style.display = 'flex';
 }
 
@@ -2151,21 +2369,22 @@ function startAdvancedExport() {
     const isPureValue = document.getElementById('exportPureValue').checked;
     if (selectedSheets.length === 0) return alert("請至少選擇一個要輸出的工作表");
 
+    // ★ 修正：exportFancyExcelAdvanced 是 async，原本出錯時使用者完全看不到訊息
+    const runExport = () => exportFancyExcelAdvanced({ isPureValue, selectedSheets, hiddenCols, filterConfig })
+        .catch(err => { console.error(err); alert('匯出失敗：' + err.message); });
+
     // 檢查是否有缺少增值稅的地號
     const missingLands = Object.keys(data).filter(id => checkLandMissingTax(id));
-    const todayKey = 'taxWarningSuppressed_' + new Date().toISOString().slice(0, 10);
-    const suppressed = localStorage.getItem(todayKey) === '1';
+    let suppressed = false;
+    try { suppressed = localStorage.getItem(taxWarningKey()) === '1'; } catch (e) {}
 
     if (missingLands.length > 0 && !suppressed) {
         // 關掉匯出 modal，顯示增值稅警告
         closeExportModal();
-        showMissingTaxWarning(missingLands, () => {
-            // 使用者選擇忽略，繼續匯出
-            exportFancyExcelAdvanced({ isPureValue, selectedSheets, hiddenCols, filterConfig });
-        });
+        showMissingTaxWarning(missingLands, runExport); // 使用者選擇忽略，繼續匯出
         return;
     }
 
-    exportFancyExcelAdvanced({ isPureValue, selectedSheets, hiddenCols, filterConfig });
     closeExportModal();
+    runExport();
 }
