@@ -721,6 +721,9 @@
             <input id="title" type="text" class="header-input" placeholder="Untitled design - Presentation" value="Untitled design - Presentation">
         </div>
         <div class="header-right">
+            <button class="btn-export btn-paste-shot" onclick="EasymapImport.importFromClipboard()" title="截取「地籍圖資網路便民服務系統」左側的土地資料後按這裡，或在頁面上直接按 Ctrl+V">
+                <i class="fa-solid fa-paste"></i> 截圖匯入
+            </button>
             <button class="btn-export" onclick="newNum()">
                 <i class="fa-solid fa-plus"></i> 新增地號
             </button>
@@ -907,49 +910,71 @@
         pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
     </script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
+    <!-- 固定版本：不指定版本時，Chart.js 出新的大版本就可能讓圖表壞掉 -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
     <!-- script src="data.js"></script -->
     <script>
         const urlParams = new URLSearchParams(window.location.search);
         const projectId = urlParams.get('id');
         let currentProjectIndex = -1;
 
-        if (projectId) {
+        // ★ 修正：沒有 id / 找不到專案時，原本 data、basics 是 undefined，整個頁面會壞掉
+        window.data = {};
+        window.basics = {
+            '地段': '未命名專案',
+            '地主可分配面積': { '預估獎勵容積(m²)': [0.08, 0, 0, 0], '合建基準容積分取': [0, 0.6], '合建獎勵容積分取': [0, 0.6], '預估產權面積(坪)': 1.62, '預估車位數': 0.6 },
+            '土地歸戶表': { '合計法定容積': 2.25, '地主法定容積佔比': 0.58, '都更獎勵容積': 0.5, '地主獎勵容積佔比': 0.5, '防災都更獎勵容積': 0.3, '地主防災都更佔比': 0.5, '合建分取': 1.58 }
+        };
+
+        {
             const projects = JSON.parse(localStorage.getItem('brick_projects') || '[]');
-            currentProjectIndex = projects.findIndex(p => p.id === projectId);
-            
+            currentProjectIndex = projectId ? projects.findIndex(p => p.id === projectId) : -1;
+
             if (currentProjectIndex !== -1) {
-                window.data = projects[currentProjectIndex].data;
-                window.basics = projects[currentProjectIndex].basics;
-                document.getElementById('title').value = projects[currentProjectIndex].title;
+                const p = projects[currentProjectIndex];
+                window.data = p.data || {};
+                window.basics = Object.assign(window.basics, p.basics || {});
+                document.getElementById('title').value = p.title;
             } else {
-                alert('找不到專案，將載入預設資料。');
+                alert('找不到這個專案，將回到專案列表。');
+                window.location.replace('index.html');
             }
         }
 
         // --- 建立寫回 Local Storage 的函數 ---
         window.saveProjectToLocal = function() {
-            if (currentProjectIndex === -1) return;
-            
-            const projects = JSON.parse(localStorage.getItem('brick_projects') || '[]');
-            
-            projects[currentProjectIndex].data = window.data;
-            projects[currentProjectIndex].basics = window.basics;
-            projects[currentProjectIndex].title = document.getElementById('title').value;
-            projects[currentProjectIndex].date = new Date().toLocaleDateString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit' });
-            
-            // ★ 加入這行：儲存精確到毫秒的時間戳記，用來完美排序
-            projects[currentProjectIndex].timestamp = Date.now(); 
+            if (!projectId) return;
 
-            localStorage.setItem('brick_projects', JSON.stringify(projects));
-            console.log('💾 專案已自動儲存');
+            const projects = JSON.parse(localStorage.getItem('brick_projects') || '[]');
+            // ★ 修正：每次用 id 重新找（原本用開頁時記下的 index，若在別的分頁刪除專案，會存到別的專案上）
+            const proj = projects.find(p => p.id === projectId);
+            if (!proj) { console.warn('專案已不存在，略過儲存'); return; }
+
+            proj.data = window.data;
+            proj.basics = window.basics;
+            proj.title = document.getElementById('title').value;
+            proj.date = new Date().toLocaleDateString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit' });
+            proj.timestamp = Date.now(); // 儲存精確到毫秒的時間戳記，用來排序
+
+            try {
+                localStorage.setItem('brick_projects', JSON.stringify(projects));
+                console.log('💾 專案已自動儲存');
+            } catch (err) {
+                // ★ 修正：瀏覽器儲存空間滿了，原本會直接拋錯、資料沒存到也沒提示
+                console.error(err);
+                if (!window._storageFullWarned) {
+                    window._storageFullWarned = true;
+                    alert('⚠ 瀏覽器儲存空間已滿，這次的修改沒有存到！\n請回專案列表刪除不需要的專案（或先匯出 Excel 備份）。');
+                }
+            }
         }
 
         // --- 監聽標題修改，防重複並存檔 ---
         document.getElementById('title').addEventListener('change', function(e) {
             let newTitle = e.target.value.trim();
             if (!newTitle) newTitle = "未命名專案";
+            e.target.value = newTitle; // ★ 修正：清空標題時原本會存成空字串
             document.title = newTitle + " - 磚家計算";
             
             const projects = JSON.parse(localStorage.getItem('brick_projects') || '[]');
@@ -1034,6 +1059,7 @@
     </script>
     <script src="Cpi Static.js"></script>
     <script src="script.js"></script>
+    <script src="easymap.js"></script>
     <script src="excel.js"></script>
 </body>
 
